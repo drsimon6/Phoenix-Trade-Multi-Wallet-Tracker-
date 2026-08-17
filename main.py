@@ -12,7 +12,7 @@ except ImportError:
 
 # بارگذاری تنظیمات
 TARGET_WALLETS = config.TARGET_WALLETS
-RPC_URL = config.RPC_URL
+RPC_URLS = getattr(config, 'RPC_URLS', ["https://api.mainnet-beta.solana.com"])
 TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
 POLL_INTERVAL = config.POLL_INTERVAL
@@ -43,19 +43,25 @@ def send_telegram_alert(message: str):
 
 
 def get_latest_signatures(wallet_address: str, limit: int = 5):
+    """دریافت لیست تراکنش‌ها با قابلیت Fallback روی چند RPC"""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": "getSignaturesForAddress",
         "params": [wallet_address, {"limit": limit}]
     }
-    try:
-        response = requests.post(RPC_URL, json=payload, timeout=10)
-        data = response.json()
-        if "result" in data:
-            return data["result"]
-    except Exception as e:
-        print(f"⚠️ Solana RPC Error: {e}")
+    
+    for rpc_url in RPC_URLS:
+        try:
+            response = requests.post(rpc_url, json=payload, timeout=6)
+            data = response.json()
+            if "result" in data:
+                return data["result"]
+        except Exception:
+            # در صورت خطا روی RPC جاری، سیستم سراغ RPC بعدی در لیست می‌رود
+            continue
+            
+    print("⚠️ All RPCs failed to fetch signatures.")
     return []
 
 
@@ -68,7 +74,7 @@ def get_parsed_transaction_helius(signature: str):
     payload = {"transactions": [signature]}
     
     try:
-        response = requests.post(url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, timeout=8)
         data = response.json()
         if isinstance(data, list) and len(data) > 0:
             return data[0]
@@ -78,30 +84,24 @@ def get_parsed_transaction_helius(signature: str):
 
 
 def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
-    """
-    بررسی می‌کند که آیا این تراکنش مربوط به پروتکل Phoenix/Ember است یا خیر.
-    """
+    """بررسی اختصاصی تراکنش‌های Phoenix / Ember"""
     if parsed_tx:
-        # ۱. بررسی Source در هلیوس
         source = str(parsed_tx.get("source", "")).upper()
         if "PHOENIX" in source or "EMBER" in source:
             return True
 
-        # ۲. بررسی قراردادهای فراخوانی‌شده (Instructions)
         instructions = parsed_tx.get("instructions", [])
         for inst in instructions:
             program_id = inst.get("programId", "")
             if program_id in PHOENIX_PROGRAM_IDS:
                 return True
 
-        # ۳. بررسی توکن‌های جابجا شده (مثل PhUsd)
         account_data = parsed_tx.get("accountData", [])
         for acc in account_data:
             account_key = acc.get("account", "")
             if account_key in PHOENIX_PROGRAM_IDS:
                 return True
 
-    # ۴. بررسی لاگ‌های خام تراکنش در صورت نبود دیتای هلیوس
     if raw_logs:
         logs_str = " ".join(raw_logs).lower()
         if any(keyword in logs_str for keyword in ["phoenix", "ember", "phusd", "phoenixz8"]):
@@ -111,7 +111,7 @@ def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
 
 
 def extract_phoenix_trade_details(parsed_tx):
-    """استخراج نوع دستور، شرح متنی معامله و حجم توکن‌های جابجا شده"""
+    """استخراج جزئیات معامله"""
     if not parsed_tx:
         return "Phoenix Activity", "جزئیات تکمیلی دریافت نشد."
 
@@ -131,7 +131,7 @@ def extract_phoenix_trade_details(parsed_tx):
 
     for nt in native_transfers:
         sol_amount = nt.get("amount", 0) / 1e9
-        if sol_amount > 0.001:  # فیلتر کردن کارمزدهای ناچیز
+        if sol_amount > 0.001:
             transfers_summary.append(f"• {sol_amount:.4f} SOL")
 
     details_str = f"<b>شرح حرکت:</b> {description}\n"
@@ -142,6 +142,7 @@ def extract_phoenix_trade_details(parsed_tx):
 
 
 def get_transaction_details_rpc_fallback(signature: str):
+    """دریافت اطلاعات خام تراکنش با سیستم سوئیچ خودکار بین RPCها"""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -151,18 +152,19 @@ def get_transaction_details_rpc_fallback(signature: str):
             {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
         ]
     }
-    try:
-        response = requests.post(RPC_URL, json=payload, timeout=10)
-        data = response.json()
-        if "result" in data and data["result"]:
-            return data["result"]
-    except Exception as e:
-        print(f"⚠️ RPC Fallback Error: {e}")
+    for rpc_url in RPC_URLS:
+        try:
+            response = requests.post(rpc_url, json=payload, timeout=6)
+            data = response.json()
+            if "result" in data and data["result"]:
+                return data["result"]
+        except Exception:
+            continue
     return None
 
 
 def start_monitoring():
-    print("🚀 Phoenix Wallet Monitoring Bot Started (Filtered for Phoenix Trade only)...")
+    print("🚀 Phoenix Wallet Monitoring Bot Started (Multi-RPC Failover Active)...")
     last_processed_signatures = {}
 
     for wallet_addr, wallet_name in TARGET_WALLETS.items():
@@ -170,7 +172,7 @@ def start_monitoring():
         last_processed_signatures[wallet_addr] = initial_sigs[0]["signature"] if initial_sigs else None
         time.sleep(0.3)
 
-    send_telegram_alert("🚀 <b>Phoenix Monitoring Bot is live (Filtering only Phoenix DEX trades).</b>")
+    send_telegram_alert("🚀 <b>Phoenix Monitoring Bot is live (Multi-RPC Enabled).</b>")
 
     while True:
         try:
@@ -196,7 +198,7 @@ def start_monitoring():
                         time_str = datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S') if block_time else "Unknown"
                         status = "❌ Failed" if err else "✅ Success"
 
-                        # ۱. آنالیز تراکنش با هلیوس
+                        # ۱. دریافت جزییات دکود شده از هلیوس
                         parsed_tx = get_parsed_transaction_helius(sig)
                         
                         raw_logs = []
@@ -210,7 +212,7 @@ def start_monitoring():
                             last_processed_signatures[wallet_addr] = sig
                             continue
 
-                        # ۳. استخراج جزئیات در صورت مرتبط بودن با Phoenix
+                        # ۳. ساخت متن گزارش
                         if parsed_tx:
                             action_type, trade_details = extract_phoenix_trade_details(parsed_tx)
                         else:
