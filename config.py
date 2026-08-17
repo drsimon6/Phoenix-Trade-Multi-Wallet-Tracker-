@@ -21,3 +21,6 @@ POLL_INTERVAL = 3
 TARGET_WALLETS = {
     "wallet1": "Sample Wallet", # Pre-add one sample for testing
 }
+
+# Helius API Key for enhanced transaction parsing
+HELIUS_API_KEY = "your-helius-api-key-here"
