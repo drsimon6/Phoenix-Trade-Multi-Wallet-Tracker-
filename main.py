@@ -18,6 +18,13 @@ TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
 POLL_INTERVAL = config.POLL_INTERVAL
 HELIUS_API_KEY = getattr(config, 'HELIUS_API_KEY', '')
 
+# شناسه‌های اختصاصی قراردادهای Phoenix روی شبکه سولانا
+PHOENIX_PROGRAM_IDS = {
+    "PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY",  # Phoenix DEX Main Program
+    "EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy",  # Ember Collateral/Margin Program
+    "PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A",  # Phoenix USDC Mint
+}
+
 
 def send_telegram_alert(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -35,7 +42,7 @@ def send_telegram_alert(message: str):
         print(f"⚠️ Telegram Alert Error: {e}")
 
 
-def get_latest_signatures(wallet_address: str, limit: int = 3):
+def get_latest_signatures(wallet_address: str, limit: int = 5):
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -70,6 +77,39 @@ def get_parsed_transaction_helius(signature: str):
     return None
 
 
+def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
+    """
+    بررسی می‌کند که آیا این تراکنش مربوط به پروتکل Phoenix/Ember است یا خیر.
+    """
+    if parsed_tx:
+        # ۱. بررسی Source در هلیوس
+        source = str(parsed_tx.get("source", "")).upper()
+        if "PHOENIX" in source or "EMBER" in source:
+            return True
+
+        # ۲. بررسی قراردادهای فراخوانی‌شده (Instructions)
+        instructions = parsed_tx.get("instructions", [])
+        for inst in instructions:
+            program_id = inst.get("programId", "")
+            if program_id in PHOENIX_PROGRAM_IDS:
+                return True
+
+        # ۳. بررسی توکن‌های جابجا شده (مثل PhUsd)
+        account_data = parsed_tx.get("accountData", [])
+        for acc in account_data:
+            account_key = acc.get("account", "")
+            if account_key in PHOENIX_PROGRAM_IDS:
+                return True
+
+    # ۴. بررسی لاگ‌های خام تراکنش در صورت نبود دیتای هلیوس
+    if raw_logs:
+        logs_str = " ".join(raw_logs).lower()
+        if any(keyword in logs_str for keyword in ["phoenix", "ember", "phusd", "phoenixz8"]):
+            return True
+
+    return False
+
+
 def extract_phoenix_trade_details(parsed_tx):
     """استخراج نوع دستور، شرح متنی معامله و حجم توکن‌های جابجا شده"""
     if not parsed_tx:
@@ -102,7 +142,6 @@ def extract_phoenix_trade_details(parsed_tx):
 
 
 def get_transaction_details_rpc_fallback(signature: str):
-    """روش رزرو برای مواقعی که کلید هلیوس ست نشده باشد"""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -122,24 +161,8 @@ def get_transaction_details_rpc_fallback(signature: str):
     return None
 
 
-def parse_logs_fallback(logs):
-    if not logs:
-        return "General Solana Transaction"
-    logs_str = " ".join(logs).lower()
-    if "ember" in logs_str or "phusd" in logs_str:
-        return "🔥 Phoenix Activity (Margin / Deposit / Withdraw)"
-    elif "place" in logs_str or "order" in logs_str:
-        return "⚡ Place / Fill Order"
-    elif "cancel" in logs_str:
-        return "❌ Cancel Order"
-    elif "swap" in logs_str:
-        return "🔄 Instant Swap"
-    else:
-        return "📊 Phoenix Contract Interaction"
-
-
 def start_monitoring():
-    print("🚀 Phoenix Wallet Monitoring Bot Started...")
+    print("🚀 Phoenix Wallet Monitoring Bot Started (Filtered for Phoenix Trade only)...")
     last_processed_signatures = {}
 
     for wallet_addr, wallet_name in TARGET_WALLETS.items():
@@ -147,7 +170,7 @@ def start_monitoring():
         last_processed_signatures[wallet_addr] = initial_sigs[0]["signature"] if initial_sigs else None
         time.sleep(0.3)
 
-    send_telegram_alert("🚀 <b>Phoenix Monitoring Bot is live and listening for new transactions.</b>")
+    send_telegram_alert("🚀 <b>Phoenix Monitoring Bot is live (Filtering only Phoenix DEX trades).</b>")
 
     while True:
         try:
@@ -173,23 +196,31 @@ def start_monitoring():
                         time_str = datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S') if block_time else "Unknown"
                         status = "❌ Failed" if err else "✅ Success"
 
-                        # آنالیز تراکنش با هلیوس
+                        # ۱. آنالیز تراکنش با هلیوس
                         parsed_tx = get_parsed_transaction_helius(sig)
                         
+                        raw_logs = []
+                        if not parsed_tx:
+                            tx_details = get_transaction_details_rpc_fallback(sig)
+                            raw_logs = tx_details["meta"]["logMessages"] if tx_details and "meta" in tx_details and tx_details["meta"].get("logMessages") else []
+
+                        # ۲. فیلتر کردن تراکنش‌های غیرمرتبط با Phoenix
+                        if not is_phoenix_transaction(parsed_tx, raw_logs):
+                            print(f"ℹ️ Skipping non-Phoenix transaction: {sig[:8]}...")
+                            last_processed_signatures[wallet_addr] = sig
+                            continue
+
+                        # ۳. استخراج جزئیات در صورت مرتبط بودن با Phoenix
                         if parsed_tx:
                             action_type, trade_details = extract_phoenix_trade_details(parsed_tx)
                         else:
-                            # روش پشتیبان در صورت عدم دریافت پاسخ از هلیوس
-                            tx_details = get_transaction_details_rpc_fallback(sig)
-                            logs = tx_details["meta"]["logMessages"] if tx_details and "meta" in tx_details and tx_details["meta"].get("logMessages") else []
-                            action_type = parse_logs_fallback(logs)
+                            action_type = "⚡ Phoenix Contract Interaction"
                             trade_details = "جزئیات پیشرفته در دسترس نیست."
 
-                        # لینک مستقیم پورتفولیوی شخص در فونیکس
                         phoenix_portfolio_url = f"https://www.phoenix.trade/portfolio?ghost={wallet_addr}"
 
                         alert_text = (
-                            f"🔔 <b>تراکنش جدید ثبت شد!</b>\n\n"
+                            f"🦅 <b>تراکنش جدید Phoenix ثبت شد!</b>\n\n"
                             f"🏷 <b>نام ولت:</b> {wallet_name}\n"
                             f"👤 <b>آدرس:</b> <code>{wallet_addr[:6]}...{wallet_addr[-4:]}</code>\n"
                             f"📌 <b>نوع دستور:</b> {action_type}\n"
