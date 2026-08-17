@@ -1,0 +1,16 @@
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# User configuration files
+config.py
+
+# Common IDE settings
+.idea/
+.vscode/
+.DS_Store
+
+# Common dependency locations
+env/
+venv/
