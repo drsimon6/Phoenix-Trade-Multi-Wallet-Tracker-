@@ -1,14 +1,22 @@
 import time
 import requests
 from datetime import datetime
-import config # Import user configuration
+import sys
 
-# Replace old constants with config values
+# بررسی وجود فایل تنظیمات
+try:
+    import config
+except ImportError:
+    print("\n⚠️ Error: 'config.py' not found! Please create it before running.")
+    sys.exit(1)
+
+# بارگذاری تنظیمات
 TARGET_WALLETS = config.TARGET_WALLETS
 RPC_URL = config.RPC_URL
 TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
 POLL_INTERVAL = config.POLL_INTERVAL
+HELIUS_API_KEY = getattr(config, 'HELIUS_API_KEY', '')
 
 
 def send_telegram_alert(message: str):
@@ -44,7 +52,57 @@ def get_latest_signatures(wallet_address: str, limit: int = 3):
     return []
 
 
-def get_transaction_details(signature: str):
+def get_parsed_transaction_helius(signature: str):
+    """دریافت جزییات دکود شده تراکنش مستقیماً از API هلیوس"""
+    if not HELIUS_API_KEY:
+        return None
+        
+    url = f"https://api.helius.xyz/v0/transactions?api-key={HELIUS_API_KEY}"
+    payload = {"transactions": [signature]}
+    
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        data = response.json()
+        if isinstance(data, list) and len(data) > 0:
+            return data[0]
+    except Exception as e:
+        print(f"⚠️ Helius Parse API Error: {e}")
+    return None
+
+
+def extract_phoenix_trade_details(parsed_tx):
+    """استخراج نوع دستور، شرح متنی معامله و حجم توکن‌های جابجا شده"""
+    if not parsed_tx:
+        return "Phoenix Activity", "جزئیات تکمیلی دریافت نشد."
+
+    description = parsed_tx.get("description", "بدون شرح متنی")
+    tx_type = parsed_tx.get("type", "UNKNOWN")
+
+    token_transfers = parsed_tx.get("tokenTransfers", [])
+    native_transfers = parsed_tx.get("nativeTransfers", [])
+
+    transfers_summary = []
+    
+    for tt in token_transfers:
+        amount = tt.get("tokenAmount", 0)
+        mint = tt.get("mint", "")
+        symbol = f"{mint[:4]}...{mint[-4:]}" if len(mint) > 8 else "Token"
+        transfers_summary.append(f"• {amount} ({symbol})")
+
+    for nt in native_transfers:
+        sol_amount = nt.get("amount", 0) / 1e9
+        if sol_amount > 0.001:  # فیلتر کردن کارمزدهای ناچیز
+            transfers_summary.append(f"• {sol_amount:.4f} SOL")
+
+    details_str = f"<b>شرح حرکت:</b> {description}\n"
+    if transfers_summary:
+        details_str += "<b>حجم جابجایی:</b>\n" + "\n".join(transfers_summary[:4])
+
+    return f"⚡ {tx_type}", details_str
+
+
+def get_transaction_details_rpc_fallback(signature: str):
+    """روش رزرو برای مواقعی که کلید هلیوس ست نشده باشد"""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -60,11 +118,11 @@ def get_transaction_details(signature: str):
         if "result" in data and data["result"]:
             return data["result"]
     except Exception as e:
-        print(f"⚠️ Transaction Details Error: {e}")
+        print(f"⚠️ RPC Fallback Error: {e}")
     return None
 
 
-def parse_logs_for_phoenix(logs):
+def parse_logs_fallback(logs):
     if not logs:
         return "General Solana Transaction"
     logs_str = " ".join(logs).lower()
@@ -115,18 +173,31 @@ def start_monitoring():
                         time_str = datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S') if block_time else "Unknown"
                         status = "❌ Failed" if err else "✅ Success"
 
-                        tx_details = get_transaction_details(sig)
-                        logs = tx_details["meta"]["logMessages"] if tx_details and "meta" in tx_details and tx_details["meta"].get("logMessages") else []
-                        action_summary = parse_logs_for_phoenix(logs)
+                        # آنالیز تراکنش با هلیوس
+                        parsed_tx = get_parsed_transaction_helius(sig)
+                        
+                        if parsed_tx:
+                            action_type, trade_details = extract_phoenix_trade_details(parsed_tx)
+                        else:
+                            # روش پشتیبان در صورت عدم دریافت پاسخ از هلیوس
+                            tx_details = get_transaction_details_rpc_fallback(sig)
+                            logs = tx_details["meta"]["logMessages"] if tx_details and "meta" in tx_details and tx_details["meta"].get("logMessages") else []
+                            action_type = parse_logs_fallback(logs)
+                            trade_details = "جزئیات پیشرفته در دسترس نیست."
+
+                        # لینک مستقیم پورتفولیوی شخص در فونیکس
+                        phoenix_portfolio_url = f"https://www.phoenix.trade/portfolio?ghost={wallet_addr}"
 
                         alert_text = (
-                            f"🔔 <b>New Transaction Detected!</b>\n\n"
-                            f"🏷 <b>Wallet Alias:</b> {wallet_name}\n"
-                            f"👤 <b>Address:</b> <code>{wallet_addr[:6]}...{wallet_addr[-4:]}</code>\n"
-                            f"📌 <b>Activity:</b> {action_summary}\n"
-                            f"📊 <b>Status:</b> {status}\n"
-                            f"⏰ <b>Time:</b> {time_str}\n\n"
-                            f"🔗 <a href='https://solscan.io/tx/{sig}'>View on Solscan</a>"
+                            f"🔔 <b>تراکنش جدید ثبت شد!</b>\n\n"
+                            f"🏷 <b>نام ولت:</b> {wallet_name}\n"
+                            f"👤 <b>آدرس:</b> <code>{wallet_addr[:6]}...{wallet_addr[-4:]}</code>\n"
+                            f"📌 <b>نوع دستور:</b> {action_type}\n"
+                            f"📊 <b>وضعیت:</b> {status}\n"
+                            f"⏰ <b>زمان:</b> {time_str}\n\n"
+                            f"📝 {trade_details}\n\n"
+                            f"🔗 <a href='https://solscan.io/tx/{sig}'>مشاهده تراکنش در Solscan</a>\n"
+                            f"🦅 <a href='{phoenix_portfolio_url}'>مشاهده پورتفولیو در Phoenix</a>"
                         )
                         send_telegram_alert(alert_text)
                         last_processed_signatures[wallet_addr] = sig
