@@ -2,6 +2,7 @@ import time
 import requests
 from datetime import datetime
 import sys
+import itertools
 
 # بررسی وجود فایل تنظیمات
 try:
@@ -12,14 +13,19 @@ except ImportError:
 
 # بارگذاری تنظیمات
 TARGET_WALLETS = config.TARGET_WALLETS
-HELIUS_API_KEY = getattr(config, 'HELIUS_API_KEY', '')
 POLL_INTERVAL = getattr(config, 'POLL_INTERVAL', 3)
 TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
 
-# لیست RPCهای معتبر جهت پشتیبانی متقابل
-DEFAULT_RPCS = [
-    f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}" if HELIUS_API_KEY else "https://api.mainnet-beta.solana.com",
+# بارگذاری لیست کلیدهای هلیوس
+HELIUS_API_KEYS = getattr(config, 'HELIUS_API_KEYS', [])
+if not HELIUS_API_KEYS and hasattr(config, 'HELIUS_API_KEY') and config.HELIUS_API_KEY:
+    HELIUS_API_KEYS = [config.HELIUS_API_KEY]
+
+# ساخت عمومی iterator چرخشی برای کلیدهای هلیوس
+helius_key_cycle = itertools.cycle(HELIUS_API_KEYS) if HELIUS_API_KEYS else None
+
+DEFAULT_RPCS = [f"https://mainnet.helius-rpc.com/?api-key={k}" for k in HELIUS_API_KEYS] + [
     "https://api.mainnet-beta.solana.com",
     "https://solana-rpc.publicnode.com"
 ]
@@ -31,7 +37,6 @@ PHOENIX_PROGRAM_IDS = {
     "PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A",  # Phoenix USDC Mint
 }
 
-# ساخت Session پایدار
 session = requests.Session()
 session.headers.update({
     "Content-Type": "application/json",
@@ -65,32 +70,40 @@ def get_latest_signatures(wallet_address: str, limit: int = 5):
     
     for rpc_url in RPC_URLS:
         try:
-            res = session.post(rpc_url, json=payload, timeout=6)
+            res = session.post(rpc_url, json=payload, timeout=5)
             if res.status_code == 200:
                 data = res.json()
                 if "result" in data:
                     return data["result"]
         except Exception:
-            continue  # در صورت تایم‌اوت، بی‌صدا سراغ RPC بعدی می‌رود
+            continue
             
     return []
 
 
 def get_parsed_transaction_helius(signature: str):
-    if not HELIUS_API_KEY:
+    """دریافت اطلاعات دکود شده با چرخش بین کلیدهای Helius"""
+    if not HELIUS_API_KEYS:
         return None
+
+    # بررسی تک‌تک کلیدها به صورت چرخشی در صورت بروز خطا
+    for _ in range(len(HELIUS_API_KEYS)):
+        current_key = next(helius_key_cycle)
+        url = f"https://api.helius.xyz/v0/transactions?api-key={current_key}"
+        payload = {"transactions": [signature]}
         
-    url = f"https://api.helius.xyz/v0/transactions?api-key={HELIUS_API_KEY}"
-    payload = {"transactions": [signature]}
-    
-    try:
-        res = session.post(url, json=payload, timeout=8)
-        if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, list) and len(data) > 0:
-                return data[0]
-    except Exception:
-        pass
+        try:
+            res = session.post(url, json=payload, timeout=6)
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, list) and len(data) > 0:
+                    return data[0]
+            elif res.status_code == 429:
+                # کلید به سقف درخواست رسیده؛ سوییچ فوری به کلید بعدی
+                continue
+        except Exception:
+            continue
+
     return None
 
 
@@ -154,7 +167,7 @@ def get_transaction_details_rpc_fallback(signature: str):
     }
     for rpc_url in RPC_URLS:
         try:
-            res = session.post(rpc_url, json=payload, timeout=6)
+            res = session.post(rpc_url, json=payload, timeout=5)
             if res.status_code == 200:
                 data = res.json()
                 if "result" in data and data["result"]:
@@ -165,7 +178,7 @@ def get_transaction_details_rpc_fallback(signature: str):
 
 
 def start_monitoring():
-    print("🚀 Phoenix Wallet Monitoring Bot Started...")
+    print(f"🚀 Phoenix Monitoring Bot Started - Loaded {len(HELIUS_API_KEYS)} Helius API Key(s)...")
     last_processed_signatures = {}
 
     for wallet_addr, wallet_name in TARGET_WALLETS.items():
@@ -177,7 +190,7 @@ def start_monitoring():
             last_processed_signatures[wallet_addr] = None
         time.sleep(0.2)
 
-    send_telegram_alert("🚀 <b>Phoenix Monitoring Bot is live and listening.</b>")
+    send_telegram_alert(f"🚀 <b>Phoenix Monitoring Bot is live with Multi-Key Helius ({len(HELIUS_API_KEYS)} Keys).</b>")
 
     while True:
         try:
