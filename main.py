@@ -149,11 +149,10 @@ def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
     return False
 
 
-def extract_action_from_logs_and_tx(parsed_tx, raw_logs):
-    """شناسایی هوشمند نوع دستور بر اساس لاگ‌ها و دیتاهای تراکنش"""
+def extract_clean_action(parsed_tx, raw_logs):
+    """استخراج دستور تمیز بدون نمایش کلمه UNKNOWN"""
     logs_text = " ".join(raw_logs).lower() if raw_logs else ""
-    
-    # ۱. برچسب‌گذاری هوشمند براساس الگوی لاگ‌های Phoenix
+
     if "placelimit" in logs_text or "place_limit" in logs_text:
         return "📥 ثبت سفارش لیمیت (Limit Order)"
     if "placemarket" in logs_text or "place_market" in logs_text:
@@ -171,45 +170,60 @@ def extract_action_from_logs_and_tx(parsed_tx, raw_logs):
     if "initialize" in logs_text:
         return "🆕 افتتاح حساب Phoenix"
 
-    # ۲. بررسی تایپ ارسال‌شده توسط API
     if parsed_tx:
-        tx_type = str(parsed_tx.get("type", "")).upper()
+        tx_type = str(parsed_tx.get("type", "")).strip().upper()
         if tx_type and tx_type != "UNKNOWN":
             return f"⚡ {tx_type}"
 
-    # ۳. متن جایگزین استاندارد در صورت عدم یافتن مشخصه لاگ
-    return "⚡ ثبت / لغو سفارش در Phoenix"
+    return "⚡ ثبت / مدیریت سفارش Phoenix"
 
 
-def parse_trade_details_comprehensive(parsed_tx, raw_logs):
-    """استخراج حجم توکن‌ها و نوع دقیق تراکنش"""
-    action_type = extract_action_from_logs_and_tx(parsed_tx, raw_logs)
+def parse_trade_details_comprehensive(parsed_tx, raw_logs, target_wallet):
+    action_type = extract_clean_action(parsed_tx, raw_logs)
     transfers_summary = []
-    
+
     if parsed_tx:
         for tt in parsed_tx.get("tokenTransfers", []):
             amount = float(tt.get("tokenAmount", 0))
             mint = tt.get("mint", "")
-            symbol = KNOWN_TOKENS.get(mint, f"{mint[:4]}...{mint[-4:]}")
+            symbol = KNOWN_TOKENS.get(mint, f"{mint[:4]}...{mint[-4:]}" if len(mint) > 8 else "Token")
+            from_user = tt.get("fromUserAccount", "")
+            to_user = tt.get("toUserAccount", "")
+
             if amount > 0:
-                transfers_summary.append(f"• {amount:,.4f} {symbol}")
+                if to_user == target_wallet:
+                    transfers_summary.append(f"🟢 دریافتی: {amount:,.4f} {symbol}")
+                elif from_user == target_wallet:
+                    transfers_summary.append(f"🔴 ارسالی/واریز: {amount:,.4f} {symbol}")
+                else:
+                    transfers_summary.append(f"• جابه‌جایی: {amount:,.4f} {symbol}")
 
         for nt in parsed_tx.get("nativeTransfers", []):
             amount = float(nt.get("amount", 0)) / 1e9
-            if amount > 0.005:
-                transfers_summary.append(f"• {amount:,.4f} SOL")
+            from_user = nt.get("fromUserAccount", "")
+            to_user = nt.get("toUserAccount", "")
+
+            if amount > 0.002:
+                if to_user == target_wallet:
+                    transfers_summary.append(f"🟢 دریافتی: {amount:,.4f} SOL")
+                elif from_user == target_wallet:
+                    transfers_summary.append(f"🔴 ارسالی/واریز: {amount:,.4f} SOL")
+
+    description = parsed_tx.get("description") if parsed_tx else None
 
     if transfers_summary:
         unique_transfers = list(dict.fromkeys(transfers_summary))
-        details_text = "<b>حجم و توکن‌های درگیر:</b>\n" + "\n".join(unique_transfers[:4])
+        details_text = "<b>حجم و توکن‌های درگیر:</b>\n" + "\n".join(unique_transfers[:5])
+    elif description:
+        details_text = f"<b>شرح تراکنش:</b> {description}"
     else:
-        details_text = "📝 <i>دستور ثبت/لغو سفارش یا به‌روزرسانی حساب (بدون تغییر آنی موجودی).</i>"
+        details_text = "📝 <i>دستور ثبت/لغو سفارش لیمیت یا به‌روزرسانی حساب (بدون جابه‌جایی آنی).</i>"
 
     return action_type, details_text
 
 
 def start_monitoring():
-    print(f"🚀 Phoenix Smart Decoder Active ({len(HELIUS_API_KEYS)} Keys)...")
+    print(f"🚀 Phoenix Strict Filter Active ({len(HELIUS_API_KEYS)} Keys)...")
     last_processed_signatures = {}
 
     for wallet_addr, wallet_name in TARGET_WALLETS.items():
@@ -221,7 +235,7 @@ def start_monitoring():
             last_processed_signatures[wallet_addr] = None
         time.sleep(0.2)
 
-    send_telegram_alert("🚀 <b>Phoenix Tracker Engine Updated.</b>")
+    send_telegram_alert("🚀 <b>Phoenix Tracker Engine Cleaned & Restarted.</b>")
 
     while True:
         try:
@@ -243,13 +257,13 @@ def start_monitoring():
                         sig = tx_info["signature"]
                         err = tx_info.get("err")
                         block_time = tx_info.get("blockTime")
-                        
+
                         time_str = datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S') if block_time else "Unknown"
                         status = "❌ Failed" if err else "✅ Success"
 
                         parsed_tx = get_parsed_transaction_helius(sig)
                         raw_logs = []
-                        
+
                         tx_details = get_transaction_details_rpc_fallback(sig)
                         if tx_details and "meta" in tx_details:
                             raw_logs = tx_details["meta"].get("logMessages", [])
@@ -259,7 +273,7 @@ def start_monitoring():
                             last_processed_signatures[wallet_addr] = sig
                             continue
 
-                        action_type, trade_details = parse_trade_details_comprehensive(parsed_tx, raw_logs)
+                        action_type, trade_details = parse_trade_details_comprehensive(parsed_tx, raw_logs, wallet_addr)
                         phoenix_portfolio_url = f"https://www.phoenix.trade/portfolio?ghost={wallet_addr}"
 
                         alert_text = (
