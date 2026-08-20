@@ -41,17 +41,6 @@ KNOWN_TOKENS = {
     "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": "BONK"
 }
 
-PHOENIX_INSTRUCTION_MAP = {
-    "placelimitorder": "📥 ثبت سفارش لیمیت (Limit Order)",
-    "placemarketorder": "⚡ معامله مارکت (Market Order)",
-    "swap": "🔄 معامله آنی (Swap)",
-    "cancelorder": "❌ لغو سفارش (Cancel Order)",
-    "cancelallorders": "❌ لغو تمام سفارش‌ها",
-    "depositfunds": "📥 واریز به پورتفولیو Phoenix",
-    "withdrawfunds": "📤 برداشت از پورتفولیو Phoenix",
-    "initializeaccount": "🆕 افتتاح حساب Phoenix",
-}
-
 session = requests.Session()
 session.headers.update({
     "Content-Type": "application/json",
@@ -160,33 +149,44 @@ def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
     return False
 
 
-def extract_instruction_name_from_logs(raw_logs):
-    """استخراج دستور دقیق از لاگ‌های شبکه"""
-    if not raw_logs:
-        return None
-    for log in raw_logs:
-        log_lower = log.lower()
-        if "instruction:" in log_lower:
-            parts = log_lower.split("instruction:")[1].strip().split()
-            if parts:
-                inst_code = parts[0].strip()
-                if inst_code in PHOENIX_INSTRUCTION_MAP:
-                    return PHOENIX_INSTRUCTION_MAP[inst_code]
-    return None
+def extract_action_from_logs_and_tx(parsed_tx, raw_logs):
+    """شناسایی هوشمند نوع دستور بر اساس لاگ‌ها و دیتاهای تراکنش"""
+    logs_text = " ".join(raw_logs).lower() if raw_logs else ""
+    
+    # ۱. برچسب‌گذاری هوشمند براساس الگوی لاگ‌های Phoenix
+    if "placelimit" in logs_text or "place_limit" in logs_text:
+        return "📥 ثبت سفارش لیمیت (Limit Order)"
+    if "placemarket" in logs_text or "place_market" in logs_text:
+        return "⚡ معامله مارکت (Market Order)"
+    if "cancelall" in logs_text:
+        return "❌ لغو تمام سفارش‌ها"
+    if "cancel" in logs_text:
+        return "❌ لغو سفارش (Cancel Order)"
+    if "deposit" in logs_text:
+        return "📥 واریز مارجین / پورتفولیو"
+    if "withdraw" in logs_text:
+        return "📤 برداشت از پورتفولیو"
+    if "swap" in logs_text:
+        return "🔄 معامله آنی (Swap)"
+    if "initialize" in logs_text:
+        return "🆕 افتتاح حساب Phoenix"
+
+    # ۲. بررسی تایپ ارسال‌شده توسط API
+    if parsed_tx:
+        tx_type = str(parsed_tx.get("type", "")).upper()
+        if tx_type and tx_type != "UNKNOWN":
+            return f"⚡ {tx_type}"
+
+    # ۳. متن جایگزین استاندارد در صورت عدم یافتن مشخصه لاگ
+    return "⚡ ثبت / لغو سفارش در Phoenix"
 
 
 def parse_trade_details_comprehensive(parsed_tx, raw_logs):
-    """استخراج جامع جزئیات معامله و جابه‌جایی توکن‌ها"""
-    action_type = extract_instruction_name_from_logs(raw_logs)
-
+    """استخراج حجم توکن‌ها و نوع دقیق تراکنش"""
+    action_type = extract_action_from_logs_and_tx(parsed_tx, raw_logs)
     transfers_summary = []
     
     if parsed_tx:
-        if not action_type:
-            tx_type = str(parsed_tx.get("type", "")).lower()
-            action_type = PHOENIX_INSTRUCTION_MAP.get(tx_type, f"⚡ {parsed_tx.get('type', 'Phoenix Instruction')}")
-
-        # استخراج توکن‌های SPL
         for tt in parsed_tx.get("tokenTransfers", []):
             amount = float(tt.get("tokenAmount", 0))
             mint = tt.get("mint", "")
@@ -194,18 +194,12 @@ def parse_trade_details_comprehensive(parsed_tx, raw_logs):
             if amount > 0:
                 transfers_summary.append(f"• {amount:,.4f} {symbol}")
 
-        # استخراج SOL
         for nt in parsed_tx.get("nativeTransfers", []):
             amount = float(nt.get("amount", 0)) / 1e9
             if amount > 0.005:
                 transfers_summary.append(f"• {amount:,.4f} SOL")
 
-    if not action_type:
-        action_type = "⚡ معامله/دستور Phoenix"
-
-    details_text = ""
     if transfers_summary:
-        # حذف موارد تکراری
         unique_transfers = list(dict.fromkeys(transfers_summary))
         details_text = "<b>حجم و توکن‌های درگیر:</b>\n" + "\n".join(unique_transfers[:4])
     else:
@@ -215,7 +209,7 @@ def parse_trade_details_comprehensive(parsed_tx, raw_logs):
 
 
 def start_monitoring():
-    print(f"🚀 Phoenix Fixed Tracker Active ({len(HELIUS_API_KEYS)} Helius Keys)...")
+    print(f"🚀 Phoenix Smart Decoder Active ({len(HELIUS_API_KEYS)} Keys)...")
     last_processed_signatures = {}
 
     for wallet_addr, wallet_name in TARGET_WALLETS.items():
@@ -227,7 +221,7 @@ def start_monitoring():
             last_processed_signatures[wallet_addr] = None
         time.sleep(0.2)
 
-    send_telegram_alert("🚀 <b>Phoenix Smart Tracker Updated.</b>")
+    send_telegram_alert("🚀 <b>Phoenix Tracker Engine Updated.</b>")
 
     while True:
         try:
@@ -256,7 +250,6 @@ def start_monitoring():
                         parsed_tx = get_parsed_transaction_helius(sig)
                         raw_logs = []
                         
-                        # همواره لاگ‌های خام را جهت تشخیص دقیق دستور دریافت می‌کنیم
                         tx_details = get_transaction_details_rpc_fallback(sig)
                         if tx_details and "meta" in tx_details:
                             raw_logs = tx_details["meta"].get("logMessages", [])
