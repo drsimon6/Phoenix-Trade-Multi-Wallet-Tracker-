@@ -33,7 +33,6 @@ PHOENIX_PROGRAM_IDS = {
     "PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A",
 }
 
-# شناسه توکن‌های شناخته‌شده جهت تشخیص مارکت و قیمت
 KNOWN_TOKENS = {
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
     "PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A": "phUSD",
@@ -43,12 +42,13 @@ KNOWN_TOKENS = {
 }
 
 PHOENIX_INSTRUCTION_MAP = {
-    "placelimitorder": "📥 ثبت سفارش لیمیت",
-    "placemarketorder": "⚡ معامله مارکت",
+    "placelimitorder": "📥 ثبت سفارش لیمیت (Limit Order)",
+    "placemarketorder": "⚡ معامله مارکت (Market Order)",
     "swap": "🔄 معامله آنی (Swap)",
-    "cancelorder": "❌ لغو سفارش",
-    "depositfunds": "📥 واریز مارجین / پورتفولیو",
-    "withdrawfunds": "📤 برداشت از پورتفولیو",
+    "cancelorder": "❌ لغو سفارش (Cancel Order)",
+    "cancelallorders": "❌ لغو تمام سفارش‌ها",
+    "depositfunds": "📥 واریز به پورتفولیو Phoenix",
+    "withdrawfunds": "📤 برداشت از پورتفولیو Phoenix",
     "initializeaccount": "🆕 افتتاح حساب Phoenix",
 }
 
@@ -160,73 +160,62 @@ def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
     return False
 
 
-def parse_trade_metrics(parsed_tx, target_wallet):
-    """محاسبه دقیق جهت معامله (خرید/فروش)، جفت‌ارز، حجم و قیمت میانگین اجرا"""
-    if not parsed_tx:
+def extract_instruction_name_from_logs(raw_logs):
+    """استخراج دستور دقیق از لاگ‌های شبکه"""
+    if not raw_logs:
         return None
+    for log in raw_logs:
+        log_lower = log.lower()
+        if "instruction:" in log_lower:
+            parts = log_lower.split("instruction:")[1].strip().split()
+            if parts:
+                inst_code = parts[0].strip()
+                if inst_code in PHOENIX_INSTRUCTION_MAP:
+                    return PHOENIX_INSTRUCTION_MAP[inst_code]
+    return None
 
-    incoming_tokens = []
-    outgoing_tokens = []
 
-    # بررسی انتقال توکن‌ها
-    for tt in parsed_tx.get("tokenTransfers", []):
-        amount = float(tt.get("tokenAmount", 0))
-        mint = tt.get("mint", "")
-        symbol = KNOWN_TOKENS.get(mint, f"{mint[:4]}...{mint[-4:]}")
-        
-        if tt.get("toUserAccount") == target_wallet and amount > 0:
-            incoming_tokens.append({"symbol": symbol, "amount": amount, "mint": mint})
-        elif tt.get("fromUserAccount") == target_wallet and amount > 0:
-            outgoing_tokens.append({"symbol": symbol, "amount": amount, "mint": mint})
+def parse_trade_details_comprehensive(parsed_tx, raw_logs):
+    """استخراج جامع جزئیات معامله و جابه‌جایی توکن‌ها"""
+    action_type = extract_instruction_name_from_logs(raw_logs)
 
-    # بررسی انتقال SOL
-    for nt in parsed_tx.get("nativeTransfers", []):
-        amount = float(nt.get("amount", 0)) / 1e9
-        if amount > 0.005:
-            if nt.get("toUserAccount") == target_wallet:
-                incoming_tokens.append({"symbol": "SOL", "amount": amount, "mint": "SOL"})
-            elif nt.get("fromUserAccount") == target_wallet:
-                outgoing_tokens.append({"symbol": "SOL", "amount": amount, "mint": "SOL"})
+    transfers_summary = []
+    
+    if parsed_tx:
+        if not action_type:
+            tx_type = str(parsed_tx.get("type", "")).lower()
+            action_type = PHOENIX_INSTRUCTION_MAP.get(tx_type, f"⚡ {parsed_tx.get('type', 'Phoenix Instruction')}")
 
-    # تحلیل خرید یا فروش
-    side = "UNKNOWN"
-    base_asset = "Asset"
-    quote_asset = "USDC"
-    base_amount = 0.0
-    quote_amount = 0.0
+        # استخراج توکن‌های SPL
+        for tt in parsed_tx.get("tokenTransfers", []):
+            amount = float(tt.get("tokenAmount", 0))
+            mint = tt.get("mint", "")
+            symbol = KNOWN_TOKENS.get(mint, f"{mint[:4]}...{mint[-4:]}")
+            if amount > 0:
+                transfers_summary.append(f"• {amount:,.4f} {symbol}")
 
-    in_usdc = next((t for t in incoming_tokens if t["symbol"] in ["USDC", "phUSD"]), None)
-    out_usdc = next((t for t in outgoing_tokens if t["symbol"] in ["USDC", "phUSD"]), None)
+        # استخراج SOL
+        for nt in parsed_tx.get("nativeTransfers", []):
+            amount = float(nt.get("amount", 0)) / 1e9
+            if amount > 0.005:
+                transfers_summary.append(f"• {amount:,.4f} SOL")
 
-    in_crypto = next((t for t in incoming_tokens if t["symbol"] not in ["USDC", "phUSD"]), None)
-    out_crypto = next((t for t in outgoing_tokens if t["symbol"] not in ["USDC", "phUSD"]), None)
+    if not action_type:
+        action_type = "⚡ معامله/دستور Phoenix"
 
-    if out_usdc and in_crypto:
-        side = "🟢 BUY (خرید / Long)"
-        base_asset = in_crypto["symbol"]
-        quote_asset = out_usdc["symbol"]
-        base_amount = in_crypto["amount"]
-        quote_amount = out_usdc["amount"]
-    elif in_usdc and out_crypto:
-        side = "🔴 SELL (فروش / Short)"
-        base_asset = out_crypto["symbol"]
-        quote_asset = in_usdc["symbol"]
-        base_amount = out_crypto["amount"]
-        quote_amount = in_usdc["amount"]
+    details_text = ""
+    if transfers_summary:
+        # حذف موارد تکراری
+        unique_transfers = list(dict.fromkeys(transfers_summary))
+        details_text = "<b>حجم و توکن‌های درگیر:</b>\n" + "\n".join(unique_transfers[:4])
+    else:
+        details_text = "📝 <i>دستور ثبت/لغو سفارش یا به‌روزرسانی حساب (بدون تغییر آنی موجودی).</i>"
 
-    price = (quote_amount / base_amount) if base_amount > 0 else 0.0
-
-    return {
-        "market": f"{base_asset}/{quote_asset}",
-        "side": side,
-        "size": f"{base_amount:,.4f} {base_asset}",
-        "value": f"{quote_amount:,.2f} {quote_asset}",
-        "price": f"${price:,.4f}" if price > 0 else "N/A"
-    }
+    return action_type, details_text
 
 
 def start_monitoring():
-    print(f"🚀 Phoenix Advanced Perps/Spot Tracker Active ({len(HELIUS_API_KEYS)} Keys)...")
+    print(f"🚀 Phoenix Fixed Tracker Active ({len(HELIUS_API_KEYS)} Helius Keys)...")
     last_processed_signatures = {}
 
     for wallet_addr, wallet_name in TARGET_WALLETS.items():
@@ -238,7 +227,7 @@ def start_monitoring():
             last_processed_signatures[wallet_addr] = None
         time.sleep(0.2)
 
-    send_telegram_alert("🚀 <b>Phoenix Advanced Perps Tracker Online.</b>")
+    send_telegram_alert("🚀 <b>Phoenix Smart Tracker Updated.</b>")
 
     while True:
         try:
@@ -267,44 +256,33 @@ def start_monitoring():
                         parsed_tx = get_parsed_transaction_helius(sig)
                         raw_logs = []
                         
-                        if not is_phoenix_transaction(parsed_tx):
-                            tx_details = get_transaction_details_rpc_fallback(sig)
-                            if tx_details and "meta" in tx_details:
-                                raw_logs = tx_details["meta"].get("logMessages", [])
+                        # همواره لاگ‌های خام را جهت تشخیص دقیق دستور دریافت می‌کنیم
+                        tx_details = get_transaction_details_rpc_fallback(sig)
+                        if tx_details and "meta" in tx_details:
+                            raw_logs = tx_details["meta"].get("logMessages", [])
 
                         if not is_phoenix_transaction(parsed_tx, raw_logs):
                             print(f"ℹ️ Skipping non-Phoenix transaction: {sig[:8]}...")
                             last_processed_signatures[wallet_addr] = sig
                             continue
 
-                        # استخراج سنجه‌های معامله
-                        metrics = parse_trade_metrics(parsed_tx, wallet_addr)
+                        action_type, trade_details = parse_trade_details_comprehensive(parsed_tx, raw_logs)
                         phoenix_portfolio_url = f"https://www.phoenix.trade/portfolio?ghost={wallet_addr}"
-
-                        if metrics and metrics["side"] != "UNKNOWN":
-                            trade_info_block = (
-                                f"📊 <b>Market:</b> {metrics['market']}\n"
-                                f"🎯 <b>Side:</b> {metrics['side']}\n"
-                                f"📏 <b>Size:</b> {metrics['size']}\n"
-                                f"💵 <b>Position Value:</b> {metrics['value']}\n"
-                                f"🏷 <b>Execution Price:</b> {metrics['price']}\n"
-                            )
-                        else:
-                            trade_info_block = "📝 <b>نوع دستور:</b> تغییر تنظیمات حساب / مدیریت سفارشات"
 
                         alert_text = (
                             f"🦅 <b>تراکنش جدید Phoenix ثبت شد!</b>\n\n"
                             f"🏷 <b>نام ولت:</b> {wallet_name}\n"
                             f"👤 <b>آدرس:</b> <code>{wallet_addr[:6]}...{wallet_addr[-4:]}</code>\n"
+                            f"📌 <b>نوع دستور:</b> {action_type}\n"
                             f"📊 <b>وضعیت:</b> {status}\n"
                             f"⏰ <b>زمان:</b> {time_str}\n\n"
-                            f"{trade_info_block}\n\n"
-                            f"💡 <i>جهت مشاهده uPnL، قیمت لیکویید و Margin زنده به لینک پورتفولیو مراجعه کنید:</i>\n"
+                            f"{trade_details}\n\n"
+                            f"💡 <i>جهت مشاهده uPnL، قیمت لیکویید و پوزیشن‌های فعال:</i>\n"
                             f"🔗 <a href='https://solscan.io/tx/{sig}'>مشاهده تراکنش در Solscan</a>\n"
                             f"🦅 <a href='{phoenix_portfolio_url}'>مشاهده پورتفولیو زنده در Phoenix</a>"
                         )
                         send_telegram_alert(alert_text)
-                        print(f"🚀 Detailed Alert Sent for {sig[:10]}!")
+                        print(f"🚀 Alert Sent for {sig[:10]}!")
                         last_processed_signatures[wallet_addr] = sig
 
                 time.sleep(0.2)
