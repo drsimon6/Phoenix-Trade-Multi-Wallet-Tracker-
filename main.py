@@ -1,57 +1,28 @@
+import asyncio
+import aiohttp
 import time
-import requests
 from datetime import datetime
 import sys
-import itertools
 
 try:
     import config
 except ImportError:
-    print("\n⚠️ Error: 'config.py' not found! Please create it before running.")
+    print("\n⚠️ Error: 'config.py' not found!")
     sys.exit(1)
 
 TARGET_WALLETS = config.TARGET_WALLETS
-POLL_INTERVAL = getattr(config, 'POLL_INTERVAL', 3)
+POLL_INTERVAL = getattr(config, 'POLL_INTERVAL', 1)  # کاهش فاصله بررسی به ۱ ثانیه
 TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
 
-HELIUS_API_KEYS = getattr(config, 'HELIUS_API_KEYS', [])
-if not HELIUS_API_KEYS and hasattr(config, 'HELIUS_API_KEY') and config.HELIUS_API_KEY:
-    HELIUS_API_KEYS = [config.HELIUS_API_KEY]
-
-helius_key_cycle = itertools.cycle(HELIUS_API_KEYS) if HELIUS_API_KEYS else None
-
-DEFAULT_RPCS = [f"https://mainnet.helius-rpc.com/?api-key={k}" for k in HELIUS_API_KEYS] + [
+RPC_URLS = getattr(config, 'RPC_URLS', [
     "https://api.mainnet-beta.solana.com",
     "https://solana-rpc.publicnode.com"
-]
-RPC_URLS = getattr(config, 'RPC_URLS', DEFAULT_RPCS)
-
-PHOENIX_PROGRAM_IDS = {
-    "PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY",
-    "EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy",
-    "PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A",
-}
-
-# نقشه آدرس‌های Mint اصلی سولانا به نام توکن‌ها
-KNOWN_MINTS = {
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
-    "PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A": "phUSD",
-    "So11111111111111111111111111111111111111112": "SOL",
-    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": "JUP",
-    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": "BONK",
-    "3NZ9JMVBmGAq3NVqnE5Vt3825yM26P2Y7bbTNDpm28w6": "BTC",
-    "7vfCXTUXxR2wN22884f1EZ8f18k1922334": "ETH"
-}
-
-session = requests.Session()
-session.headers.update({
-    "Content-Type": "application/json",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-})
+])
 
 
-def send_telegram_alert(message: str):
+async def send_telegram_alert(session: aiohttp.ClientSession, message: str):
+    """ارسال سریع و غیرمسدودکننده به تلگرام"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -62,271 +33,123 @@ def send_telegram_alert(message: str):
         "disable_web_page_preview": True
     }
     try:
-        session.post(url, json=payload, timeout=5)
+        async with session.post(url, json=payload, timeout=3) as resp:
+            pass
     except Exception as e:
-        print(f"⚠️ Telegram Alert Error: {e}")
+        print(f"⚠️ Telegram Error: {e}")
 
 
-def get_latest_signatures(wallet_address: str, limit: int = 5):
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getSignaturesForAddress",
-        "params": [wallet_address, {"limit": limit}]
-    }
+async def fetch_rpc(session: aiohttp.ClientSession, method: str, params: list):
+    """اجرای سریع درخواست‌های RPC"""
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     for rpc_url in RPC_URLS:
         try:
-            res = session.post(rpc_url, json=payload, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                if "result" in data:
-                    return data["result"]
-        except Exception:
-            continue
-    return []
-
-
-def get_parsed_transaction_helius(signature: str):
-    if not HELIUS_API_KEYS:
-        return None
-
-    for _ in range(len(HELIUS_API_KEYS)):
-        current_key = next(helius_key_cycle)
-        url = f"https://api.helius.xyz/v0/transactions?api-key={current_key}"
-        payload = {"transactions": [signature]}
-        try:
-            res = session.post(url, json=payload, timeout=6)
-            if res.status_code == 200:
-                data = res.json()
-                if isinstance(data, list) and len(data) > 0:
-                    return data[0]
-            elif res.status_code == 429:
-                continue
+            async with session.post(rpc_url, json=payload, timeout=2.5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if "result" in data:
+                        return data["result"]
         except Exception:
             continue
     return None
 
 
-def get_transaction_details_rpc_fallback(signature: str):
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getTransaction",
-        "params": [
-            signature,
-            {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
-        ]
-    }
-    for rpc_url in RPC_URLS:
-        try:
-            res = session.post(rpc_url, json=payload, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                if "result" in data and data["result"]:
-                    return data["result"]
-        except Exception:
-            continue
-    return None
-
-
-def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
-    if parsed_tx:
-        source = str(parsed_tx.get("source", "")).upper()
-        if "PHOENIX" in source or "EMBER" in source:
-            return True
-
-        for inst in parsed_tx.get("instructions", []):
-            if inst.get("programId", "") in PHOENIX_PROGRAM_IDS:
-                return True
-
-    if raw_logs:
-        logs_str = " ".join(raw_logs).lower()
-        if any(kw in logs_str for kw in ["phoenix", "ember", "phusd", "phoenixz8"]):
-            return True
-
-    return False
-
-
-def calculate_balance_deltas(tx_details, target_wallet):
-    """محاسبه دقیق تغییرات موجودی توکن‌ها بر اساس Pre و Post Balances سولانا"""
-    if not tx_details or "meta" not in tx_details:
-        return []
-
-    meta = tx_details["meta"]
-    pre_balances = meta.get("preTokenBalances", [])
-    post_balances = meta.get("postTokenBalances", [])
-
-    balance_map = {}
-
-    for item in pre_balances:
-        owner = item.get("owner", "")
-        idx = item.get("accountIndex")
-        mint = item.get("mint", "")
-        amt = float(item.get("uiTokenAmount", {}).get("uiAmount") or 0)
-        balance_map[idx] = {"owner": owner, "mint": mint, "pre": amt, "post": 0.0}
-
-    for item in post_balances:
-        owner = item.get("owner", "")
-        idx = item.get("accountIndex")
-        mint = item.get("mint", "")
-        amt = float(item.get("uiTokenAmount", {}).get("uiAmount") or 0)
-        if idx in balance_map:
-            balance_map[idx]["post"] = amt
-        else:
-            balance_map[idx] = {"owner": owner, "mint": mint, "pre": 0.0, "post": amt}
-
-    results = []
-    for idx, data in balance_map.items():
-        delta = data["post"] - data["pre"]
-        if abs(delta) > 1e-6:
-            mint = data["mint"]
-            symbol = KNOWN_MINTS.get(mint, f"{mint[:4]}...{mint[-4:]}" if len(mint) > 8 else "Token")
-            results.append({
-                "owner": data["owner"],
-                "symbol": symbol,
-                "delta": delta
-            })
-
-    return results
-
-
-def parse_trade_details_v2(parsed_tx, tx_details, raw_logs, target_wallet):
-    logs_text = " ".join(raw_logs).lower() if raw_logs else ""
+def quick_detect_action(logs: list) -> str:
+    """تشخیص فوری نوع دستور از روی لاگ‌های متنی بدون کندی سرعت"""
+    if not logs:
+        return "⚡ معامله / مدیریت سفارش Phoenix"
     
-    # تشخیص نوع دستور
-    if "placelimit" in logs_text or "place_limit" in logs_text:
-        action_type = "📥 ثبت سفارش لیمیت (Limit Order)"
-    elif "placemarket" in logs_text or "place_market" in logs_text:
-        action_type = "⚡ معامله مارکت (Market Order)"
-    elif "cancel" in logs_text:
-        action_type = "❌ لغو سفارش (Cancel Order)"
-    else:
-        action_type = "⚡ معامله / مدیریت سفارش Phoenix"
-
-    # ۱. استخراج تغییرات از Helius Token Transfers
-    transfers_list = []
-    if parsed_tx and "tokenTransfers" in parsed_tx:
-        for tt in parsed_tx.get("tokenTransfers", []):
-            amt = float(tt.get("tokenAmount", 0) or 0)
-            mint = tt.get("mint", "")
-            symbol = KNOWN_MINTS.get(mint, f"{mint[:4]}...{mint[-4:]}" if len(mint) > 8 else "Token")
-            from_acc = tt.get("fromUserAccount", "")
-            to_acc = tt.get("toUserAccount", "")
-
-            if amt > 0:
-                if to_acc == target_wallet:
-                    transfers_list.append(f"🟢 دریافت: <b>{amt:,.4f} {symbol}</b>")
-                elif from_acc == target_wallet:
-                    transfers_list.append(f"🔴 پرداخت: <b>{amt:,.4f} {symbol}</b>")
-                else:
-                    transfers_list.append(f"⚡ حجم منتقل شده: <b>{amt:,.4f} {symbol}</b>")
-
-    # ۲. پشتیبان: محاسبه تغییرات موجودی از Pre/Post Balances سولانا
-    if not transfers_list:
-        deltas = calculate_balance_deltas(tx_details, target_wallet)
-        base_amt = 0.0
-        quote_amt = 0.0
-        
-        for d in deltas:
-            amt = d["delta"]
-            symbol = d["symbol"]
-            if amt > 0:
-                transfers_list.append(f"🟢 افزایش موجودی: <b>+{amt:,.4f} {symbol}</b>")
-            else:
-                transfers_list.append(f"🔴 کاهش موجودی: <b>{amt:,.4f} {symbol}</b>")
-
-            if symbol in ["USDC", "phUSD"]:
-                quote_amt = abs(amt)
-            else:
-                base_amt = abs(amt)
-
-        if base_amt > 0 and quote_amt > 0:
-            calc_price = quote_amt / base_amt
-            transfers_list.append(f"💵 <b>قیمت تقریبی اجرای معامله:</b> ${calc_price:,.4f}")
-
-    if transfers_list:
-        details_text = "📊 <b>جزئیات حجم و توکن‌های معامله:</b>\n" + "\n".join(transfers_list)
-    else:
-        details_text = "📝 <i>سفارش ثبت/ویرایش شد (بدون جابه‌جایی آنی توکن در لحظه).</i>"
-
-    return action_type, details_text
+    logs_str = " ".join(logs).lower()
+    if "placelimit" in logs_str or "place_limit" in logs_str:
+        return "📥 ثبت سفارش لیمیت (Limit Order)"
+    elif "placemarket" in logs_str or "place_market" in logs_str:
+        return "⚡ معامله مارکت (Market Order)"
+    elif "cancel" in logs_str:
+        return "❌ لغو سفارش (Cancel Order)"
+    
+    return "⚡ معامله / مدیریت سفارش Phoenix"
 
 
-def start_monitoring():
-    print(f"🚀 Phoenix Token Balance Tracking Engine Active...")
-    last_processed_signatures = {}
+async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, wallet_name: str, last_signatures: dict):
+    """بررسی سریع تراکنش‌های ولت"""
+    sigs = await fetch_rpc(session, "getSignaturesForAddress", [wallet_addr, {"limit": 3}])
+    if not sigs:
+        return
 
-    for wallet_addr, wallet_name in TARGET_WALLETS.items():
-        sigs = get_latest_signatures(wallet_addr, limit=1)
-        if sigs:
-            last_processed_signatures[wallet_addr] = sigs[0]["signature"]
-            print(f"✅ Registered [{wallet_name}]")
-        else:
-            last_processed_signatures[wallet_addr] = None
-        time.sleep(0.2)
+    last_sig = last_signatures.get(wallet_addr)
+    if last_sig is None:
+        last_signatures[wallet_addr] = sigs[0]["signature"]
+        print(f"✅ Fast Monitoring set for [{wallet_name}]")
+        return
 
-    send_telegram_alert("🚀 <b>Phoenix Tracker Engine Updated with Pre/Post Balance Parser.</b>")
+    new_sigs = []
+    for sig_info in sigs:
+        sig = sig_info["signature"]
+        if sig == last_sig:
+            break
+        new_sigs.append(sig_info)
 
-    while True:
-        try:
-            for wallet_addr, wallet_name in TARGET_WALLETS.items():
-                signatures = get_latest_signatures(wallet_addr, limit=5)
-                if not signatures:
-                    continue
+    if new_sigs:
+        # به‌روزرسانی سریع آخرین امضا
+        last_signatures[wallet_addr] = new_sigs[0]["signature"]
 
-                last_sig = last_processed_signatures.get(wallet_addr)
-                new_txs = []
-                for sig_info in signatures:
-                    sig = sig_info["signature"]
-                    if sig == last_sig:
-                        break
-                    new_txs.append(sig_info)
+        for sig_info in reversed(new_sigs):
+            sig = sig_info["signature"]
+            err = sig_info.get("err")
+            block_time = sig_info.get("blockTime")
+            
+            time_str = datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S') if block_time else "Unknown"
+            status = "❌ Failed" if err else "✅ Success"
 
-                if new_txs:
-                    for tx_info in reversed(new_txs):
-                        sig = tx_info["signature"]
-                        err = tx_info.get("err")
-                        block_time = tx_info.get("blockTime")
+            # استخراج سبک لاگ‌ها جهت تعیین نوع دستور
+            tx_info = await fetch_rpc(session, "getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+            raw_logs = tx_info.get("meta", {}).get("logMessages", []) if tx_info else []
+            
+            action_type = quick_detect_action(raw_logs)
+            phoenix_portfolio_url = f"https://www.phoenix.trade/portfolio?ghost={wallet_addr}"
 
-                        time_str = datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S') if block_time else "Unknown"
-                        status = "❌ Failed" if err else "✅ Success"
+            alert_text = (
+                f"🦅 <b>تراکنش جدید Phoenix ثبت شد!</b>\n\n"
+                f"🏷 <b>نام ولت:</b> {wallet_name}\n"
+                f"👤 <b>آدرس:</b> <code>{wallet_addr[:6]}...{wallet_addr[-4:]}</code>\n"
+                f"📌 <b>نوع دستور:</b> {action_type}\n"
+                f"📊 <b>وضعیت:</b> {status}\n"
+                f"⏰ <b>زمان:</b> {time_str}\n\n"
+                f"💡 <i>جهت مشاهده جزئیات پوزیشن و پورتفولیو:</i>\n"
+                f"🔗 <a href='https://solscan.io/tx/{sig}'>مشاهده تراکنش در Solscan</a>\n"
+                f"🦅 <a href='{phoenix_portfolio_url}'>مشاهده پورتفولیو زنده در Phoenix</a>"
+            )
 
-                        parsed_tx = get_parsed_transaction_helius(sig)
-                        tx_details = get_transaction_details_rpc_fallback(sig)
+            # ارسال آنلاین و بی‌درنگ
+            asyncio.create_task(send_telegram_alert(session, alert_text))
+            print(f"⚡ FAST Alert sent for {sig[:8]}")
 
-                        raw_logs = []
-                        if tx_details and "meta" in tx_details:
-                            raw_logs = tx_details["meta"].get("logMessages", [])
 
-                        if not is_phoenix_transaction(parsed_tx, raw_logs):
-                            last_processed_signatures[wallet_addr] = sig
-                            continue
+async def main():
+    print("🚀 Ultra-Fast Phoenix Tracker Active...")
+    last_signatures = {}
 
-                        action_type, trade_details = parse_trade_details_v2(parsed_tx, tx_details, raw_logs, wallet_addr)
-                        phoenix_portfolio_url = f"https://www.phoenix.trade/portfolio?ghost={wallet_addr}"
+    async with aiohttp.ClientSession() as session:
+        # اعلان شروع به تلگرام
+        await send_telegram_alert(session, "🚀 <b>High-Speed Phoenix Engine Started.</b>")
 
-                        alert_text = (
-                            f"🦅 <b>تراکنش جدید Phoenix ثبت شد!</b>\n\n"
-                            f"🏷 <b>نام ولت:</b> {wallet_name}\n"
-                            f"👤 <b>آدرس:</b> <code>{wallet_addr[:6]}...{wallet_addr[-4:]}</code>\n"
-                            f"📌 <b>نوع دستور:</b> {action_type}\n"
-                            f"📊 <b>وضعیت:</b> {status}\n"
-                            f"⏰ <b>زمان:</b> {time_str}\n\n"
-                            f"{trade_details}\n\n"
-                            f"💡 <i>جهت مشاهده uPnL، قیمت لیکویید و پوزیشن‌های فعال:</i>\n"
-                            f"🔗 <a href='https://solscan.io/tx/{sig}'>مشاهده تراکنش در Solscan</a>\n"
-                            f"🦅 <a href='{phoenix_portfolio_url}'>مشاهده پورتفولیو زنده در Phoenix</a>"
-                        )
-                        send_telegram_alert(alert_text)
-                        print(f"🚀 Alert Sent for {sig[:10]}!")
-                        last_processed_signatures[wallet_addr] = sig
+        while True:
+            start_time = time.time()
+            
+            tasks = [
+                monitor_wallet(session, addr, name, last_signatures)
+                for addr, name in TARGET_WALLETS.items()
+            ]
+            await asyncio.gather(*tasks)
 
-                time.sleep(0.2)
-            time.sleep(POLL_INTERVAL)
-        except Exception as e:
-            print(f"⚠️ Loop Error: {e}")
-            time.sleep(3)
+            # تنظیم زمان خواب پویا برای حفظ فاصله زمانی دقیق
+            elapsed = time.time() - start_time
+            sleep_time = max(0.1, POLL_INTERVAL - elapsed)
+            await asyncio.sleep(sleep_time)
 
 
 if __name__ == "__main__":
-    start_monitoring()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nBot Stopped.")
