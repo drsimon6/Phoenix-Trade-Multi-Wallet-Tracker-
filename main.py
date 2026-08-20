@@ -35,7 +35,6 @@ PHOENIX_PROGRAM_IDS = {
     "PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A",  # Phoenix USDC Mint
 }
 
-# نقشه ترجمه دستورات Phoenix
 PHOENIX_INSTRUCTION_MAP = {
     "placelimitorder": "📥 ثبت سفارش لیمیت (Limit Order)",
     "placemarketorder": "⚡ معامله مارکت (Market Order)",
@@ -134,19 +133,30 @@ def get_transaction_details_rpc_fallback(signature: str):
 
 
 def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
+    """بررسی جامع و عمیق دستورات اصلی، دستورات داخلی (Inner Instructions) و لاگ‌ها"""
     if parsed_tx:
+        # ۱. بررسی Source
         source = str(parsed_tx.get("source", "")).upper()
         if "PHOENIX" in source or "EMBER" in source:
             return True
 
+        # ۲. بررسی دستورات سطح بالا (Outer Instructions)
         for inst in parsed_tx.get("instructions", []):
             if inst.get("programId", "") in PHOENIX_PROGRAM_IDS:
                 return True
 
+        # ۳. بررسی دستورات داخلی (Inner Instructions - برای معاملات واسطه‌ای و Jupiter)
+        for inner_group in parsed_tx.get("innerInstructions", []):
+            for inst in inner_group.get("instructions", []):
+                if inst.get("programId", "") in PHOENIX_PROGRAM_IDS:
+                    return True
+
+        # ۴. بررسی حساب‌های مرتبط
         for acc in parsed_tx.get("accountData", []):
             if acc.get("account", "") in PHOENIX_PROGRAM_IDS:
                 return True
 
+    # ۵. بررسی لاگ‌های خام
     if raw_logs:
         logs_str = " ".join(raw_logs).lower()
         if any(kw in logs_str for kw in ["phoenix", "ember", "phusd", "phoenixz8"]):
@@ -156,10 +166,8 @@ def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
 
 
 def parse_action_type(parsed_tx, raw_logs):
-    """استخراج نوع دقیق اکشن از لاگ‌ها و دستورات Phoenix"""
     detected_action = None
 
-    # بررسی لاگ‌های خام برنامه
     if raw_logs:
         for log in raw_logs:
             log_lower = log.lower()
@@ -169,7 +177,6 @@ def parse_action_type(parsed_tx, raw_logs):
                     detected_action = PHOENIX_INSTRUCTION_MAP[inst_name]
                     break
 
-    # بررسی نوع متنی Helius اگر از لاگ پیدا نشد
     if not detected_action and parsed_tx:
         tx_type = str(parsed_tx.get("type", "")).lower()
         if tx_type in PHOENIX_INSTRUCTION_MAP:
@@ -181,7 +188,6 @@ def parse_action_type(parsed_tx, raw_logs):
 
 
 def extract_phoenix_trade_details(parsed_tx, raw_logs, target_wallet):
-    """تحلیل هوشمند جابه‌جایی توکن‌ها بر اساس ورودی/خروجی ولت"""
     action_type = parse_action_type(parsed_tx, raw_logs)
     
     if not parsed_tx:
@@ -193,7 +199,6 @@ def extract_phoenix_trade_details(parsed_tx, raw_logs, target_wallet):
     incoming = []
     outgoing = []
 
-    # بررسی جابه‌جایی توکن‌های SPL
     for tt in token_transfers:
         amount = tt.get("tokenAmount", 0)
         mint = tt.get("mint", "")
@@ -207,7 +212,6 @@ def extract_phoenix_trade_details(parsed_tx, raw_logs, target_wallet):
         elif from_acc == target_wallet:
             outgoing.append(f"🔴 -{amount} ({symbol})")
 
-    # بررسی جابه‌جایی SOL
     for nt in native_transfers:
         sol_amount = nt.get("amount", 0) / 1e9
         if sol_amount > 0.001:
@@ -235,7 +239,7 @@ def extract_phoenix_trade_details(parsed_tx, raw_logs, target_wallet):
 
 
 def start_monitoring():
-    print(f"🚀 Phoenix Advanced Monitoring Bot Active ({len(HELIUS_API_KEYS)} Helius Keys)...")
+    print(f"🚀 Phoenix Deep-Inspection Tracker Active ({len(HELIUS_API_KEYS)} Helius Keys)...")
     last_processed_signatures = {}
 
     for wallet_addr, wallet_name in TARGET_WALLETS.items():
@@ -247,7 +251,7 @@ def start_monitoring():
             last_processed_signatures[wallet_addr] = None
         time.sleep(0.2)
 
-    send_telegram_alert(f"🚀 <b>Phoenix Advanced Tracker is Live.</b>")
+    send_telegram_alert(f"🚀 <b>Phoenix Tracker Updated (Deep-Inspection Active).</b>")
 
     while True:
         try:
@@ -276,7 +280,8 @@ def start_monitoring():
                         parsed_tx = get_parsed_transaction_helius(sig)
                         raw_logs = []
                         
-                        if not parsed_tx or "meta" in (parsed_tx or {}):
+                        # دریافت لاگ‌های خام در صورت نیاز به بررسی دقیق‌تر
+                        if not is_phoenix_transaction(parsed_tx):
                             tx_details = get_transaction_details_rpc_fallback(sig)
                             if tx_details and "meta" in tx_details:
                                 raw_logs = tx_details["meta"].get("logMessages", [])
@@ -301,7 +306,7 @@ def start_monitoring():
                             f"🦅 <a href='{phoenix_portfolio_url}'>مشاهده پورتفولیو در Phoenix</a>"
                         )
                         send_telegram_alert(alert_text)
-                        print(f"🚀 Detailed Alert Sent for {sig[:10]}!")
+                        print(f"🚀 Alert Sent for {sig[:10]}!")
                         last_processed_signatures[wallet_addr] = sig
 
                 time.sleep(0.2)
