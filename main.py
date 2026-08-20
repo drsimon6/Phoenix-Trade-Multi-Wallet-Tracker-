@@ -149,26 +149,24 @@ def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
     return False
 
 
-def extract_clean_action(parsed_tx, raw_logs):
-    """استخراج دستور تمیز بدون نمایش کلمه UNKNOWN"""
+def resolve_phoenix_action_name(parsed_tx, raw_logs):
+    """حذف کامل کلمه UNKNOWN و تشخیص دقیق نوع دستور"""
     logs_text = " ".join(raw_logs).lower() if raw_logs else ""
 
     if "placelimit" in logs_text or "place_limit" in logs_text:
         return "📥 ثبت سفارش لیمیت (Limit Order)"
-    if "placemarket" in logs_text or "place_market" in logs_text:
+    elif "placemarket" in logs_text or "place_market" in logs_text:
         return "⚡ معامله مارکت (Market Order)"
-    if "cancelall" in logs_text:
+    elif "cancelall" in logs_text:
         return "❌ لغو تمام سفارش‌ها"
-    if "cancel" in logs_text:
+    elif "cancel" in logs_text:
         return "❌ لغو سفارش (Cancel Order)"
-    if "deposit" in logs_text:
-        return "📥 واریز مارجین / پورتفولیو"
-    if "withdraw" in logs_text:
-        return "📤 برداشت از پورتفولیو"
-    if "swap" in logs_text:
+    elif "deposit" in logs_text:
+        return "📥 واریز به پورتفولیو Phoenix"
+    elif "withdraw" in logs_text:
+        return "📤 برداشت از پورتفولیو Phoenix"
+    elif "swap" in logs_text:
         return "🔄 معامله آنی (Swap)"
-    if "initialize" in logs_text:
-        return "🆕 افتتاح حساب Phoenix"
 
     if parsed_tx:
         tx_type = str(parsed_tx.get("type", "")).strip().upper()
@@ -179,7 +177,7 @@ def extract_clean_action(parsed_tx, raw_logs):
 
 
 def parse_trade_details_comprehensive(parsed_tx, raw_logs, target_wallet):
-    action_type = extract_clean_action(parsed_tx, raw_logs)
+    action_type = resolve_phoenix_action_name(parsed_tx, raw_logs)
     transfers_summary = []
 
     if parsed_tx:
@@ -209,13 +207,9 @@ def parse_trade_details_comprehensive(parsed_tx, raw_logs, target_wallet):
                 elif from_user == target_wallet:
                     transfers_summary.append(f"🔴 ارسالی/واریز: {amount:,.4f} SOL")
 
-    description = parsed_tx.get("description") if parsed_tx else None
-
     if transfers_summary:
         unique_transfers = list(dict.fromkeys(transfers_summary))
         details_text = "<b>حجم و توکن‌های درگیر:</b>\n" + "\n".join(unique_transfers[:5])
-    elif description:
-        details_text = f"<b>شرح تراکنش:</b> {description}"
     else:
         details_text = "📝 <i>دستور ثبت/لغو سفارش لیمیت یا به‌روزرسانی حساب (بدون جابه‌جایی آنی).</i>"
 
@@ -223,7 +217,7 @@ def parse_trade_details_comprehensive(parsed_tx, raw_logs, target_wallet):
 
 
 def start_monitoring():
-    print(f"🚀 Phoenix Strict Filter Active ({len(HELIUS_API_KEYS)} Keys)...")
+    print(f"🚀 Phoenix Clean Tracker Active ({len(HELIUS_API_KEYS)} Keys)...")
     last_processed_signatures = {}
 
     for wallet_addr, wallet_name in TARGET_WALLETS.items():
