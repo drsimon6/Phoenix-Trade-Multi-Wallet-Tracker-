@@ -65,7 +65,7 @@ def quick_detect_action(logs: list) -> str:
     elif "placemarket" in logs_str or "place_market" in logs_str:
         return "⚡ معامله مارکت (Market Order)"
     elif "cancel" in logs_str:
-        return "❌ لغو سفارش (Cancel Order)"
+        return "❌ لغو سفارش (Cancel limit Order)"
     
     return "⚡ معامله / مدیریت سفارش Phoenix"
 
