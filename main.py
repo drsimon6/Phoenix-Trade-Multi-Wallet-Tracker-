@@ -3,7 +3,6 @@ import requests
 from datetime import datetime
 import sys
 import itertools
-import re
 
 try:
     import config
@@ -145,24 +144,53 @@ def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
     return False
 
 
-def parse_phoenix_logs_and_events(raw_logs, parsed_tx):
-    extracted_info = []
+def extract_inner_transfers(tx_details, parsed_tx, target_wallet):
+    """استخراج عمیق جابه‌جایی توکن‌ها از Inner Instructions و Helius Token Transfers"""
+    transfers = []
 
-    if parsed_tx and parsed_tx.get("description"):
-        desc = parsed_tx.get("description")
-        extracted_info.append(f"📊 <b>خلاصه Helius:</b>\n<i>{desc}</i>")
+    # ۱. استخراج از Helius Token Transfers
+    if parsed_tx and "tokenTransfers" in parsed_tx:
+        for tt in parsed_tx.get("tokenTransfers", []):
+            amt = float(tt.get("tokenAmount", 0) or 0)
+            mint = tt.get("mint", "")
+            symbol = KNOWN_TOKENS.get(mint, f"{mint[:4]}...{mint[-4:]}" if len(mint) > 8 else "Token")
+            from_acc = tt.get("fromUserAccount", "")
+            to_acc = tt.get("toUserAccount", "")
 
-    if raw_logs:
-        for log in raw_logs:
-            if "fill" in log.lower() or "order" in log.lower():
-                matches = re.findall(r"(\d+(?:\.\d+)?)\s*(SOL|USDC|BONK|JUP|phUSD)", log, re.IGNORECASE)
-                for amount, symbol in matches:
-                    extracted_info.append(f"⚡ <b>حجم جابه‌جاشده:</b> {amount} {symbol.upper()}")
+            if amt > 0:
+                if to_acc == target_wallet or tt.get("userAccount") == target_wallet:
+                    transfers.append(("🟢 دریافت/آزادشده", amt, symbol))
+                elif from_acc == target_wallet:
+                    transfers.append(("🔴 پرداخت/قفل‌شده", amt, symbol))
+                else:
+                    transfers.append(("⚡ جابه‌جایی در Vault", amt, symbol))
 
-    return list(dict.fromkeys(extracted_info))
+    # ۲. استخراج مستقیم از Inner Instructions شبکه سولانا
+    if not transfers and tx_details and "meta" in tx_details:
+        inner_instructions = tx_details["meta"].get("innerInstructions", [])
+        for group in inner_instructions:
+            for inst in group.get("instructions", []):
+                parsed = inst.get("parsed")
+                if isinstance(parsed, dict):
+                    info = parsed.get("info", {})
+                    inst_type = parsed.get("type")
+                    if inst_type in ["transfer", "transferChecked"]:
+                        amt = 0.0
+                        if "tokenAmount" in info:
+                            amt = float(info["tokenAmount"].get("uiAmount") or 0)
+                        elif "amount" in info:
+                            # در صورت جابه‌جایی با اعشار استاندارد
+                            amt = float(info["amount"]) / 1e6
+
+                        if amt > 0:
+                            mint = info.get("mint", "")
+                            symbol = KNOWN_TOKENS.get(mint, "USDC/Token")
+                            transfers.append(("⚡ حجم درگیر در دستور", amt, symbol))
+
+    return transfers
 
 
-def parse_trade_details_comprehensive(parsed_tx, tx_details, raw_logs):
+def parse_trade_details_comprehensive(parsed_tx, tx_details, raw_logs, target_wallet):
     logs_text = " ".join(raw_logs).lower() if raw_logs else ""
     
     if "placelimit" in logs_text or "place_limit" in logs_text:
@@ -174,18 +202,34 @@ def parse_trade_details_comprehensive(parsed_tx, tx_details, raw_logs):
     else:
         action_type = "⚡ معامله / مدیریت سفارش Phoenix"
 
-    log_details = parse_phoenix_logs_and_events(raw_logs, parsed_tx)
+    transfers = extract_inner_transfers(tx_details, parsed_tx, target_wallet)
 
-    if log_details:
-        details_text = "\n".join(log_details)
+    if transfers:
+        lines = []
+        base_amt = 0.0
+        quote_amt = 0.0
+        for label, amt, symbol in transfers:
+            lines.append(f"{label}: <b>{amt:,.4f} {symbol}</b>")
+            if symbol in ["USDC", "phUSD"]:
+                quote_amt = amt
+            else:
+                base_amt = amt
+
+        if base_amt > 0 and quote_amt > 0:
+            calc_price = quote_amt / base_amt
+            lines.append(f"💵 <b>قیمت محاسبه‌شده:</b> ${calc_price:,.4f}")
+
+        details_text = "📊 <b>جزئیات حجم و توکن‌های معامله:</b>\n" + "\n".join(lines)
+    elif parsed_tx and parsed_tx.get("description"):
+        details_text = f"📊 <b>خلاصه شبکه:</b>\n<i>{parsed_tx.get('description')}</i>"
     else:
-        details_text = "📝 <i>سفارش ثبت/ویرایش شد (تغییرات درون اردر بوک Phoenix انجام شد).</i>"
+        details_text = "📝 <i>سفارش در اردر بوک ثبت/ویرایش شد (بدون جابه‌جایی آنی توکن).</i>"
 
     return action_type, details_text
 
 
 def start_monitoring():
-    print(f"🚀 Phoenix Advanced Log Engine Active...")
+    print(f"🚀 Phoenix Deep Inner Instruction Engine Active...")
     last_processed_signatures = {}
 
     for wallet_addr, wallet_name in TARGET_WALLETS.items():
@@ -197,7 +241,7 @@ def start_monitoring():
             last_processed_signatures[wallet_addr] = None
         time.sleep(0.2)
 
-    send_telegram_alert("🚀 <b>Phoenix Tracker Engine Clean Reset Complete.</b>")
+    send_telegram_alert("🚀 <b>Phoenix Tracker Engine Updated with Inner Instruction Parsing.</b>")
 
     while True:
         try:
@@ -234,7 +278,7 @@ def start_monitoring():
                             last_processed_signatures[wallet_addr] = sig
                             continue
 
-                        action_type, trade_details = parse_trade_details_comprehensive(parsed_tx, tx_details, raw_logs)
+                        action_type, trade_details = parse_trade_details_comprehensive(parsed_tx, tx_details, raw_logs, wallet_addr)
                         phoenix_portfolio_url = f"https://www.phoenix.trade/portfolio?ghost={wallet_addr}"
 
                         alert_text = (
