@@ -3,6 +3,7 @@ import requests
 from datetime import datetime
 import sys
 import itertools
+import re
 
 try:
     import config
@@ -136,11 +137,6 @@ def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
             if inst.get("programId", "") in PHOENIX_PROGRAM_IDS:
                 return True
 
-        for inner_group in parsed_tx.get("innerInstructions", []):
-            for inst in inner_group.get("instructions", []):
-                if inst.get("programId", "") in PHOENIX_PROGRAM_IDS:
-                    return True
-
     if raw_logs:
         logs_str = " ".join(raw_logs).lower()
         if any(kw in logs_str for kw in ["phoenix", "ember", "phusd", "phoenixz8"]):
@@ -149,87 +145,59 @@ def is_phoenix_transaction(parsed_tx, raw_logs=None) -> bool:
     return False
 
 
-def resolve_phoenix_action_name(parsed_tx, raw_logs):
-    """حذف کامل کلمه UNKNOWN و تشخیص دقیق نوع دستور"""
+def parse_phoenix_logs_and_events(raw_logs, parsed_tx):
+    extracted_info = []
+
+    if parsed_tx and parsed_tx.get("description"):
+        desc = parsed_tx.get("description")
+        extracted_info.append(f"📊 <b>خلاصه Helius:</b>\n<i>{desc}</i>")
+
+    if raw_logs:
+        for log in raw_logs:
+            if "fill" in log.lower() or "order" in log.lower():
+                matches = re.findall(r"(\d+(?:\.\d+)?)\s*(SOL|USDC|BONK|JUP|phUSD)", log, re.IGNORECASE)
+                for amount, symbol in matches:
+                    extracted_info.append(f"⚡ <b>حجم جابه‌جاشده:</b> {amount} {symbol.upper()}")
+
+    return list(dict.fromkeys(extracted_info))
+
+
+def parse_trade_details_comprehensive(parsed_tx, tx_details, raw_logs):
     logs_text = " ".join(raw_logs).lower() if raw_logs else ""
-
+    
     if "placelimit" in logs_text or "place_limit" in logs_text:
-        return "📥 ثبت سفارش لیمیت (Limit Order)"
+        action_type = "📥 ثبت سفارش لیمیت (Limit Order)"
     elif "placemarket" in logs_text or "place_market" in logs_text:
-        return "⚡ معامله مارکت (Market Order)"
-    elif "cancelall" in logs_text:
-        return "❌ لغو تمام سفارش‌ها"
+        action_type = "⚡ معامله مارکت (Market Order)"
     elif "cancel" in logs_text:
-        return "❌ لغو سفارش (Cancel Order)"
-    elif "deposit" in logs_text:
-        return "📥 واریز به پورتفولیو Phoenix"
-    elif "withdraw" in logs_text:
-        return "📤 برداشت از پورتفولیو Phoenix"
-    elif "swap" in logs_text:
-        return "🔄 معامله آنی (Swap)"
-
-    if parsed_tx:
-        tx_type = str(parsed_tx.get("type", "")).strip().upper()
-        if tx_type and tx_type != "UNKNOWN":
-            return f"⚡ {tx_type}"
-
-    return "⚡ ثبت / مدیریت سفارش Phoenix"
-
-
-def parse_trade_details_comprehensive(parsed_tx, raw_logs, target_wallet):
-    action_type = resolve_phoenix_action_name(parsed_tx, raw_logs)
-    transfers_summary = []
-
-    if parsed_tx:
-        for tt in parsed_tx.get("tokenTransfers", []):
-            amount = float(tt.get("tokenAmount", 0))
-            mint = tt.get("mint", "")
-            symbol = KNOWN_TOKENS.get(mint, f"{mint[:4]}...{mint[-4:]}" if len(mint) > 8 else "Token")
-            from_user = tt.get("fromUserAccount", "")
-            to_user = tt.get("toUserAccount", "")
-
-            if amount > 0:
-                if to_user == target_wallet:
-                    transfers_summary.append(f"🟢 دریافتی: {amount:,.4f} {symbol}")
-                elif from_user == target_wallet:
-                    transfers_summary.append(f"🔴 ارسالی/واریز: {amount:,.4f} {symbol}")
-                else:
-                    transfers_summary.append(f"• جابه‌جایی: {amount:,.4f} {symbol}")
-
-        for nt in parsed_tx.get("nativeTransfers", []):
-            amount = float(nt.get("amount", 0)) / 1e9
-            from_user = nt.get("fromUserAccount", "")
-            to_user = nt.get("toUserAccount", "")
-
-            if amount > 0.002:
-                if to_user == target_wallet:
-                    transfers_summary.append(f"🟢 دریافتی: {amount:,.4f} SOL")
-                elif from_user == target_wallet:
-                    transfers_summary.append(f"🔴 ارسالی/واریز: {amount:,.4f} SOL")
-
-    if transfers_summary:
-        unique_transfers = list(dict.fromkeys(transfers_summary))
-        details_text = "<b>حجم و توکن‌های درگیر:</b>\n" + "\n".join(unique_transfers[:5])
+        action_type = "❌ لغو سفارش (Cancel Order)"
     else:
-        details_text = "📝 <i>دستور ثبت/لغو سفارش لیمیت یا به‌روزرسانی حساب (بدون جابه‌جایی آنی).</i>"
+        action_type = "⚡ معامله / مدیریت سفارش Phoenix"
+
+    log_details = parse_phoenix_logs_and_events(raw_logs, parsed_tx)
+
+    if log_details:
+        details_text = "\n".join(log_details)
+    else:
+        details_text = "📝 <i>سفارش ثبت/ویرایش شد (تغییرات درون اردر بوک Phoenix انجام شد).</i>"
 
     return action_type, details_text
 
 
 def start_monitoring():
-    print(f"🚀 Phoenix Clean Tracker Active ({len(HELIUS_API_KEYS)} Keys)...")
+    print(f"🚀 Phoenix Advanced Log Engine Active...")
     last_processed_signatures = {}
 
     for wallet_addr, wallet_name in TARGET_WALLETS.items():
         sigs = get_latest_signatures(wallet_addr, limit=1)
         if sigs:
             last_processed_signatures[wallet_addr] = sigs[0]["signature"]
-            print(f"✅ Registered [{wallet_name}] - Last Sig: {sigs[0]['signature'][:10]}...")
+            print(f"✅ Registered [{wallet_name}]")
         else:
             last_processed_signatures[wallet_addr] = None
         time.sleep(0.2)
 
-    send_telegram_alert("🚀 <b>Phoenix Tracker Engine Cleaned & Restarted.</b>")
+    send_telegram_alert("🚀 <b>Phoenix Tracker Engine Clean Reset Complete.</b>")
 
     while True:
         try:
@@ -256,18 +224,17 @@ def start_monitoring():
                         status = "❌ Failed" if err else "✅ Success"
 
                         parsed_tx = get_parsed_transaction_helius(sig)
-                        raw_logs = []
-
                         tx_details = get_transaction_details_rpc_fallback(sig)
+
+                        raw_logs = []
                         if tx_details and "meta" in tx_details:
                             raw_logs = tx_details["meta"].get("logMessages", [])
 
                         if not is_phoenix_transaction(parsed_tx, raw_logs):
-                            print(f"ℹ️ Skipping non-Phoenix transaction: {sig[:8]}...")
                             last_processed_signatures[wallet_addr] = sig
                             continue
 
-                        action_type, trade_details = parse_trade_details_comprehensive(parsed_tx, raw_logs, wallet_addr)
+                        action_type, trade_details = parse_trade_details_comprehensive(parsed_tx, tx_details, raw_logs)
                         phoenix_portfolio_url = f"https://www.phoenix.trade/portfolio?ghost={wallet_addr}"
 
                         alert_text = (
