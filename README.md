@@ -76,8 +76,8 @@ POLL_INTERVAL = 1
 # === Wallets to Monitor ===
 # Format: "WALLET_ADDRESS": "ALIAS_NAME"
 TARGET_WALLETS = {
-    "Hpc8ST...ng2d": "Main Trader",
-    "5qtDZv...p8HM": "Whale Wallet",
+    "WALLET 1": "W1",
+    "WALLET 2": "W2",
 }
 
 ```
