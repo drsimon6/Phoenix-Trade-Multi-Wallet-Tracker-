@@ -67,37 +67,6 @@ async def fetch_rpc(session: aiohttp.ClientSession, method: str, params: list):
     return None
 
 
-def is_user_initiated(tx_info: dict, target_wallet: str) -> bool:
-    """بررسی دقیق تمامی امضاکنندگان (Signers) تراکنش جهت جلوگیری از رد شدن معاملات واقعی"""
-    if not tx_info or "transaction" not in tx_info:
-        return True
-
-    try:
-        message = tx_info.get("transaction", {}).get("message", {})
-        account_keys = message.get("accountKeys", [])
-        
-        if not account_keys:
-            return True
-
-        # ۱. اگر فرمت jsonParsed (دیکشنری) باشد
-        if isinstance(account_keys[0], dict):
-            for acc in account_keys:
-                if acc.get("pubkey") == target_wallet:
-                    return bool(acc.get("signer", False))
-
-        # ۲. اگر فرمت متنی (استرینگ) باشد
-        elif isinstance(account_keys[0], str):
-            header = message.get("header", {})
-            num_signatures = header.get("numRequiredSignatures", 1)
-            # امضاکنندگان همیشه در ابتدای لیست accountKeys قرار دارند
-            signer_keys = account_keys[:num_signatures]
-            return target_wallet in signer_keys
-
-    except Exception:
-        pass
-    return True
-
-
 def quick_detect_action(logs: list) -> str:
     if not logs:
         return "⚡ معامله / مدیریت سفارش Phoenix"
@@ -143,13 +112,8 @@ async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, walle
             status = "❌ Failed" if err else "✅ Success"
 
             tx_info = await fetch_rpc(session, "getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
-            
-            # بررسی امضا با تابع اصلاح شده
-            if tx_info and not is_user_initiated(tx_info, wallet_addr):
-                print(f"⏭️ System/Crank TX Ignored for {wallet_name}: {sig[:8]}")
-                continue
-
             raw_logs = tx_info.get("meta", {}).get("logMessages", []) if tx_info else []
+            
             action_type = quick_detect_action(raw_logs)
             phoenix_portfolio_url = f"https://www.phoenix.trade/portfolio?ghost={wallet_addr}"
 
@@ -166,15 +130,15 @@ async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, walle
             )
 
             asyncio.create_task(send_telegram_alert(session, alert_text))
-            print(f"⚡ REAL User Alert sent for {sig[:8]}")
+            print(f"⚡ Alert sent for {wallet_name}: {sig[:8]}")
 
 
 async def main():
-    print("🚀 Ultra-Fast Filtered Phoenix Engine Active...")
+    print("🚀 Phoenix Tracker Engine Active (100% Reliable)...")
     last_signatures = {}
 
     async with aiohttp.ClientSession() as session:
-        await send_telegram_alert(session, "🚀 <b>Filtered Phoenix Engine Started.</b>")
+        await send_telegram_alert(session, "🚀 <b>Phoenix Tracker Engine Active.</b>")
 
         while True:
             start_time = time.time()
