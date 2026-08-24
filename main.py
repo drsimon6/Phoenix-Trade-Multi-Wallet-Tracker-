@@ -68,19 +68,31 @@ async def fetch_rpc(session: aiohttp.ClientSession, method: str, params: list):
 
 
 def is_user_initiated(tx_info: dict, target_wallet: str) -> bool:
-    """بررسی واقعی بودن تراکنش: آیا خود کاربر امضاکننده (Signer) بوده یا ربات صرافی؟"""
+    """بررسی دقیق تمامی امضاکنندگان (Signers) تراکنش جهت جلوگیری از رد شدن معاملات واقعی"""
     if not tx_info or "transaction" not in tx_info:
         return True
 
     try:
-        account_keys = tx_info.get("transaction", {}).get("message", {}).get("accountKeys", [])
-        for acc in account_keys:
-            if isinstance(acc, dict):
+        message = tx_info.get("transaction", {}).get("message", {})
+        account_keys = message.get("accountKeys", [])
+        
+        if not account_keys:
+            return True
+
+        # ۱. اگر فرمت jsonParsed (دیکشنری) باشد
+        if isinstance(account_keys[0], dict):
+            for acc in account_keys:
                 if acc.get("pubkey") == target_wallet:
-                    return acc.get("signer", False)
-            elif isinstance(acc, str):
-                # اگر فرمت متنی باشد، آدرس اول (اکانت کارمزددهنده) امضاکننده اصلی است
-                return account_keys[0] == target_wallet
+                    return bool(acc.get("signer", False))
+
+        # ۲. اگر فرمت متنی (استرینگ) باشد
+        elif isinstance(account_keys[0], str):
+            header = message.get("header", {})
+            num_signatures = header.get("numRequiredSignatures", 1)
+            # امضاکنندگان همیشه در ابتدای لیست accountKeys قرار دارند
+            signer_keys = account_keys[:num_signatures]
+            return target_wallet in signer_keys
+
     except Exception:
         pass
     return True
@@ -132,7 +144,7 @@ async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, walle
 
             tx_info = await fetch_rpc(session, "getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
             
-            # 🛑 فیلتر تراکنش‌های غیرواقعی/سیستمی صرافی
+            # بررسی امضا با تابع اصلاح شده
             if tx_info and not is_user_initiated(tx_info, wallet_addr):
                 print(f"⏭️ System/Crank TX Ignored for {wallet_name}: {sig[:8]}")
                 continue
@@ -162,7 +174,7 @@ async def main():
     last_signatures = {}
 
     async with aiohttp.ClientSession() as session:
-        await send_telegram_alert(session, "🚀 <b>Filtered Phoenix Engine Started (Crank Filtering Active).</b>")
+        await send_telegram_alert(session, "🚀 <b>Filtered Phoenix Engine Started.</b>")
 
         while True:
             start_time = time.time()
