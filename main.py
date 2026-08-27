@@ -8,14 +8,22 @@ import itertools
 try:
     import config
 except ImportError:
-    print("\n⚠️ Error: 'config.py' not found!")
+    print("\n⚠️ Error: 'config.py' not found! Please rename config.example.py to config.py and fill your credentials.")
     sys.exit(1)
 
+# Wallet Configuration
 TARGET_WALLETS = config.TARGET_WALLETS
 POLL_INTERVAL = getattr(config, 'POLL_INTERVAL', 1)
 TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
 
+# Official Phoenix Program IDs on Solana Mainnet
+PHOENIX_PROGRAMS = {
+    "PhoeNiX2EyyJBKw5EaWZbg8hkfz3DcjMBNfmsyJR8qQ": "Phoenix Spot 🦅",
+    "EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih": "Phoenix Eternal (Perps) ⚡"
+}
+
+# Helius RPC Setup
 HELIUS_API_KEYS = getattr(config, 'HELIUS_API_KEYS', [])
 if not HELIUS_API_KEYS and hasattr(config, 'HELIUS_API_KEY') and config.HELIUS_API_KEY:
     HELIUS_API_KEYS = [config.HELIUS_API_KEY]
@@ -45,7 +53,7 @@ async def send_telegram_alert(session: aiohttp.ClientSession, message: str):
         "disable_web_page_preview": True
     }
     try:
-        async with session.post(url, json=payload, timeout=3) as resp:
+        async with session.post(url, json=payload, timeout=5) as resp:
             pass
     except Exception as e:
         print(f"⚠️ Telegram Error: {e}")
@@ -57,7 +65,7 @@ async def fetch_rpc(session: aiohttp.ClientSession, method: str, params: list):
     for _ in range(attempts):
         rpc_url = get_next_rpc_url()
         try:
-            async with session.post(rpc_url, json=payload, timeout=3) as resp:
+            async with session.post(rpc_url, json=payload, timeout=5) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     if "result" in data:
@@ -67,9 +75,26 @@ async def fetch_rpc(session: aiohttp.ClientSession, method: str, params: list):
     return None
 
 
+def get_phoenix_type(tx_info: dict) -> str:
+    """Detects whether the transaction interacted with Phoenix Spot or Eternal."""
+    if not tx_info:
+        return None
+    try:
+        message = tx_info.get("transaction", {}).get("message", {})
+        account_keys = message.get("accountKeys", [])
+        for acc in account_keys:
+            pubkey = acc.get("pubkey") if isinstance(acc, dict) else acc
+            if pubkey in PHOENIX_PROGRAMS:
+                return PHOENIX_PROGRAMS[pubkey]
+    except Exception:
+        pass
+    return None
+
+
 def quick_detect_action(logs: list) -> str:
+    """Parses transaction logs to determine the action type."""
     if not logs:
-        return "⚡ معامله / مدیریت سفارش Phoenix"
+        return "⚡ معامله / مدیریت سفارش"
     
     logs_str = " ".join(logs).lower()
     if "placelimit" in logs_str or "place_limit" in logs_str:
@@ -79,7 +104,7 @@ def quick_detect_action(logs: list) -> str:
     elif "cancel" in logs_str:
         return "❌ لغو سفارش (Cancel Order)"
     
-    return "⚡ معامله / مدیریت سفارش Phoenix"
+    return "⚡ معامله / مدیریت سفارش"
 
 
 async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, wallet_name: str, last_signatures: dict):
@@ -108,18 +133,24 @@ async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, walle
             err = sig_info.get("err")
             block_time = sig_info.get("blockTime")
             
+            tx_info = await fetch_rpc(session, "getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+            
+            # Filter non-Phoenix transactions
+            phoenix_market_type = get_phoenix_type(tx_info)
+            if not phoenix_market_type:
+                continue
+
             time_str = datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S') if block_time else "Unknown"
             status = "❌ Failed" if err else "✅ Success"
 
-            tx_info = await fetch_rpc(session, "getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
             raw_logs = tx_info.get("meta", {}).get("logMessages", []) if tx_info else []
-            
             action_type = quick_detect_action(raw_logs)
             phoenix_portfolio_url = f"https://www.phoenix.trade/portfolio?ghost={wallet_addr}"
 
             alert_text = (
                 f"🦅 <b>تراکنش جدید Phoenix ثبت شد!</b>\n\n"
                 f"🏷 <b>نام ولت:</b> {wallet_name}\n"
+                f"🏢 <b>بخش:</b> {phoenix_market_type}\n"
                 f"👤 <b>آدرس:</b> <code>{wallet_addr[:6]}...{wallet_addr[-4:]}</code>\n"
                 f"📌 <b>نوع دستور:</b> {action_type}\n"
                 f"📊 <b>وضعیت:</b> {status}\n"
@@ -130,15 +161,15 @@ async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, walle
             )
 
             asyncio.create_task(send_telegram_alert(session, alert_text))
-            print(f"⚡ Alert sent for {wallet_name}: {sig[:8]}")
+            print(f"⚡ Alert sent [{phoenix_market_type}] for {wallet_name}: {sig[:8]}")
 
 
 async def main():
-    print("🚀 Phoenix Tracker Engine Active (100% Reliable)...")
+    print("🚀 Dual-Engine Phoenix Tracker Active (Spot & Perps)...")
     last_signatures = {}
 
     async with aiohttp.ClientSession() as session:
-        await send_telegram_alert(session, "🚀 <b>Phoenix Tracker Engine Active.</b>")
+        await send_telegram_alert(session, "🚀 <b>Phoenix Multi-Wallet Tracker Active.</b>")
 
         while True:
             start_time = time.time()
