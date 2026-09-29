@@ -4,11 +4,18 @@ import time
 from datetime import datetime
 import sys
 import itertools
+import importlib
+
+# دریافت نام فایل کانفیگ از آرگومان ورودی ترمینال (پیش‌فرض: config)
+config_name = sys.argv[1] if len(sys.argv) > 1 else "config"
+if config_name.endswith(".py"):
+    config_name = config_name[:-3]
 
 try:
-    import config
+    config = importlib.import_module(config_name)
+    print(f"⚙️ Loaded configuration from: {config_name}.py")
 except ImportError:
-    print("\n⚠️ Error: 'config.py' not found! Please rename config.example.py to config.py and fill your credentials.")
+    print(f"\n⚠️ Error: '{config_name}.py' not found!")
     sys.exit(1)
 
 # Wallet Configuration
@@ -16,6 +23,7 @@ TARGET_WALLETS = config.TARGET_WALLETS
 POLL_INTERVAL = getattr(config, 'POLL_INTERVAL', 1)
 TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
+
 
 # Official Phoenix Program IDs on Solana Mainnet
 PHOENIX_PROGRAMS = {
