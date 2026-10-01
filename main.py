@@ -6,7 +6,9 @@ import sys
 import itertools
 import importlib
 
-# === تغییر جدید: امکان خواندن کانفیگ‌های مختلف از ترمینال ===
+# =====================================================================
+# --- Dynamic Configuration Loader ---
+# =====================================================================
 config_name = sys.argv[1] if len(sys.argv) > 1 else "config"
 if config_name.endswith(".py"):
     config_name = config_name[:-3]
@@ -62,7 +64,7 @@ async def send_telegram_alert(session: aiohttp.ClientSession, message: str):
     try:
         async with session.post(url, json=payload, timeout=5) as resp:
             if resp.status != 200:
-                print(f"⚠️️ Telegram Alert Error ({resp.status}): {await resp.text()}")
+                print(f"⚠️ Telegram Alert Error ({resp.status}): {await resp.text()}")
     except Exception as e:
         print(f"⚠️ Telegram Error: {e}")
 
@@ -78,10 +80,12 @@ async def fetch_rpc(session: aiohttp.ClientSession, method: str, params: list):
                     data = await resp.json()
                     if "result" in data:
                         return data["result"]
+                elif resp.status == 429:
+                    print("⏳ Rate limit (429) hit. Waiting 2 seconds...")
+                    await asyncio.sleep(2)
                 else:
-                    print(f"⚠️ RPC Status Error ({resp.status}) on URL: {rpc_url[:35]}...")
-        except Exception as e:
-            print(f"⚠️ RPC Connection Failed: {e}")
+                    print(f"⚠️ RPC Error ({resp.status}) on URL: {rpc_url[:35]}...")
+        except Exception:
             continue
     return None
 
