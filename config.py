@@ -9,7 +9,7 @@ TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
 
 # Polling interval in seconds
-POLL_INTERVAL = 3
+POLL_INTERVAL = 1
 
 # === Wallets to Monitor ===
 # Add wallets here in the format: "WALLET_ADDRESS": "ALIAS"
