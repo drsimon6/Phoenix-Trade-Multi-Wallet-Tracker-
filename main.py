@@ -22,7 +22,7 @@ except ImportError:
 
 # Wallet Configuration
 TARGET_WALLETS = config.TARGET_WALLETS
-POLL_INTERVAL = getattr(config, 'POLL_INTERVAL', 1)
+POLL_INTERVAL = getattr(config, 'POLL_INTERVAL', 2)
 TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
 
@@ -32,17 +32,24 @@ PHOENIX_PROGRAMS = {
     "EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih": "Phoenix Eternal (Perps) ⚡"
 }
 
-# Helius RPC Setup
+# Helius + Backup RPC Setup (Auto-failover enabled)
 HELIUS_API_KEYS = getattr(config, 'HELIUS_API_KEYS', [])
 if not HELIUS_API_KEYS and hasattr(config, 'HELIUS_API_KEY') and config.HELIUS_API_KEY:
     HELIUS_API_KEYS = [config.HELIUS_API_KEY]
 
-if HELIUS_API_KEYS:
-    RPC_URLS = [f"https://mainnet.helius-rpc.com/?api-key={k}" for k in HELIUS_API_KEYS if k and "your-" not in str(k)]
-    helius_cycle = itertools.cycle(RPC_URLS) if RPC_URLS else None
-else:
-    RPC_URLS = getattr(config, 'RPC_URLS', ["https://api.mainnet-beta.solana.com"])
-    helius_cycle = None
+helius_urls = [f"https://mainnet.helius-rpc.com/?api-key={k}" for k in HELIUS_API_KEYS if k and "your-" not in str(k)]
+
+backup_rpcs = getattr(config, 'RPC_URLS', [
+    "https://api.mainnet-beta.solana.com",
+    "https://solana-rpc.publicnode.com",
+    "https://rpc.ankr.com/solana"
+])
+
+# Combine Primary Helius with Backup RPCs
+RPC_URLS = helius_urls + [url for url in backup_rpcs if url not in helius_urls]
+helius_cycle = itertools.cycle(RPC_URLS) if RPC_URLS else None
+
+last_429_warn_time = 0
 
 
 def get_next_rpc_url():
@@ -64,14 +71,16 @@ async def send_telegram_alert(session: aiohttp.ClientSession, message: str):
     try:
         async with session.post(url, json=payload, timeout=5) as resp:
             if resp.status != 200:
-                print(f"⚠️ Telegram Alert Error ({resp.status}): {await resp.text()}")
-    except Exception as e:
-        print(f"⚠️ Telegram Error: {e}")
+                pass
+    except Exception:
+        pass
 
 
 async def fetch_rpc(session: aiohttp.ClientSession, method: str, params: list):
+    global last_429_warn_time
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     attempts = len(RPC_URLS) if RPC_URLS else 1
+
     for _ in range(attempts):
         rpc_url = get_next_rpc_url()
         try:
@@ -81,10 +90,12 @@ async def fetch_rpc(session: aiohttp.ClientSession, method: str, params: list):
                     if "result" in data:
                         return data["result"]
                 elif resp.status == 429:
-                    print("⏳ Rate limit (429) hit. Waiting 2 seconds...")
-                    await asyncio.sleep(2)
-                else:
-                    print(f"⚠️ RPC Error ({resp.status}) on URL: {rpc_url[:35]}...")
+                    # Prevent log spam: Print at most once every 15 seconds
+                    now = time.time()
+                    if now - last_429_warn_time > 15:
+                        last_429_warn_time = now
+                        print("⏳ Helius Rate Limit (429) hit. Automatically switching to backup RPC...")
+                    continue
         except Exception:
             continue
     return None
