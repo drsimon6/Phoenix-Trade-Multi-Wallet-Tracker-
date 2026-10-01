@@ -6,26 +6,23 @@ import sys
 import itertools
 import importlib
 
-# =====================================================================
-# --- Dynamic Configuration Loader ---
-# =====================================================================
-# دریافت نام فایل کانفیگ از ورودی ترمینال (پیش‌فرض: config)
-config_arg = sys.argv[1] if len(sys.argv) > 1 else "config"
-if config_arg.endswith(".py"):
-    config_arg = config_arg[:-3]
+# === تغییر جدید: امکان خواندن کانفیگ‌های مختلف از ترمینال ===
+config_name = sys.argv[1] if len(sys.argv) > 1 else "config"
+if config_name.endswith(".py"):
+    config_name = config_name[:-3]
 
 try:
-    config = importlib.import_module(config_arg)
-    print(f"⚙️ Loaded configuration file: {config_arg}.py")
+    config = importlib.import_module(config_name)
+    print(f"⚙️ Loaded configuration: {config_name}.py")
 except ImportError:
-    print(f"\n⚠️ Error: '{config_arg}.py' not found! Please make sure the config file exists.")
+    print(f"\n⚠️ Error: '{config_name}.py' not found!")
     sys.exit(1)
 
-# Wallet & Telegram Configuration
-TARGET_WALLETS = getattr(config, 'TARGET_WALLETS', {})
+# Wallet Configuration
+TARGET_WALLETS = config.TARGET_WALLETS
 POLL_INTERVAL = getattr(config, 'POLL_INTERVAL', 1)
-TELEGRAM_BOT_TOKEN = getattr(config, 'TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT_ID = getattr(config, 'TELEGRAM_CHAT_ID', '')
+TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID
 
 # Official Phoenix Program IDs on Solana Mainnet
 PHOENIX_PROGRAMS = {
@@ -40,11 +37,7 @@ if not HELIUS_API_KEYS and hasattr(config, 'HELIUS_API_KEY') and config.HELIUS_A
 
 if HELIUS_API_KEYS:
     RPC_URLS = [f"https://mainnet.helius-rpc.com/?api-key={k}" for k in HELIUS_API_KEYS if k and "your-" not in str(k)]
-    if RPC_URLS:
-        helius_cycle = itertools.cycle(RPC_URLS)
-    else:
-        RPC_URLS = getattr(config, 'RPC_URLS', ["https://api.mainnet-beta.solana.com"])
-        helius_cycle = None
+    helius_cycle = itertools.cycle(RPC_URLS) if RPC_URLS else None
 else:
     RPC_URLS = getattr(config, 'RPC_URLS', ["https://api.mainnet-beta.solana.com"])
     helius_cycle = None
@@ -58,7 +51,6 @@ def get_next_rpc_url():
 
 async def send_telegram_alert(session: aiohttp.ClientSession, message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram Error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty!")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -68,14 +60,11 @@ async def send_telegram_alert(session: aiohttp.ClientSession, message: str):
         "disable_web_page_preview": True
     }
     try:
-        async with session.post(url, json=payload, timeout=10) as resp:
+        async with session.post(url, json=payload, timeout=5) as resp:
             if resp.status != 200:
-                err_text = await resp.text()
-                print(f"❌ Telegram Error ({resp.status}): {err_text}")
-            else:
-                print("📨 Alert sent to Telegram successfully.")
+                print(f"⚠️️ Telegram Alert Error ({resp.status}): {await resp.text()}")
     except Exception as e:
-        print(f"⚠️ Telegram Connection Error: {e}")
+        print(f"⚠️ Telegram Error: {e}")
 
 
 async def fetch_rpc(session: aiohttp.ClientSession, method: str, params: list):
@@ -89,7 +78,10 @@ async def fetch_rpc(session: aiohttp.ClientSession, method: str, params: list):
                     data = await resp.json()
                     if "result" in data:
                         return data["result"]
-        except Exception:
+                else:
+                    print(f"⚠️ RPC Status Error ({resp.status}) on URL: {rpc_url[:35]}...")
+        except Exception as e:
+            print(f"⚠️ RPC Connection Failed: {e}")
             continue
     return None
 
@@ -134,7 +126,7 @@ async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, walle
     last_sig = last_signatures.get(wallet_addr)
     if last_sig is None:
         last_signatures[wallet_addr] = sigs[0]["signature"]
-        print(f"✅ Monitoring active for [{wallet_name}] ({wallet_addr[:6]}...)")
+        print(f"✅ Monitoring active for [{wallet_name}]")
         return
 
     new_sigs = []
@@ -146,7 +138,6 @@ async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, walle
 
     if new_sigs:
         last_signatures[wallet_addr] = new_sigs[0]["signature"]
-        print(f"🔔 Found {len(new_sigs)} new transaction(s) for [{wallet_name}]. Processing...")
 
         for sig_info in reversed(new_sigs):
             sig = sig_info["signature"]
@@ -181,15 +172,15 @@ async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, walle
             )
 
             asyncio.create_task(send_telegram_alert(session, alert_text))
-            print(f"⚡ Alert queued [{phoenix_market_type}] for {wallet_name}: {sig[:8]}")
+            print(f"⚡ Alert sent [{phoenix_market_type}] for {wallet_name}: {sig[:8]}")
 
 
 async def main():
-    print(f"🚀 Phoenix Tracker Active using configuration: [{config_arg}.py]...")
+    print(f"🚀 Phoenix Tracker Active using [{config_name}.py]...")
     last_signatures = {}
 
     async with aiohttp.ClientSession() as session:
-        await send_telegram_alert(session, f"🚀 <b>Phoenix Multi-Wallet Tracker Active ({config_arg}.py).</b>")
+        await send_telegram_alert(session, f"🚀 <b>Phoenix Multi-Wallet Tracker Active ({config_name}.py).</b>")
 
         while True:
             start_time = time.time()
