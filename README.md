@@ -112,7 +112,6 @@ python3 main.py config_high_volume.py
 
 ---
 
-```markdown
 ## 🌐 24/7 VPS Deployment (Ubuntu / Debian)
 
 Follow this beginner-friendly, step-by-step guide to deploy and run your bot 24/7 on a Linux VPS using background `screen` sessions.
