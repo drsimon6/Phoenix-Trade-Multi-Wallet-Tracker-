@@ -119,8 +119,10 @@ Follow this beginner-friendly, step-by-step guide to deploy and run your bot 24/
 ---
 
 ### Step 1: Update System & Install Required Packages
-Update your server's package repository and install essential utilities (`git`, `python3`, `pip`, `venv`, and `screen`):
 
+```bash
+Update your server's package repository and install essential utilities (`git`, `python3`, `pip`, `venv`, and `screen`):
+```
 sudo apt update && sudo apt upgrade -y
 sudo apt install git python3 python3-pip python3-venv screen -y
 
