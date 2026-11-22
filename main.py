@@ -5,6 +5,8 @@ from datetime import datetime
 import sys
 import itertools
 import importlib
+import json
+import os
 
 # =====================================================================
 # --- Dynamic Configuration Loader ---
@@ -50,6 +52,43 @@ RPC_URLS = helius_urls + [url for url in backup_rpcs if url not in helius_urls]
 helius_cycle = itertools.cycle(RPC_URLS) if RPC_URLS else None
 
 last_429_warn_time = 0
+SEEN_SIGNATURES_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "seen_signatures.json"
+)
+
+
+def load_seen_signatures():
+    try:
+        with open(SEEN_SIGNATURES_FILE, "r", encoding="utf-8") as file:
+            saved = json.load(file)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(saved, dict):
+        return {}
+
+    return {
+        wallet: {signature: None for signature in signatures[-1000:] if isinstance(signature, str)}
+        for wallet, signatures in saved.items()
+        if isinstance(wallet, str) and isinstance(signatures, list)
+    }
+
+
+def save_seen_signatures(seen_signatures):
+    temp_path = SEEN_SIGNATURES_FILE + ".tmp"
+    saved = {
+        wallet: list(signatures.keys())[-1000:]
+        for wallet, signatures in seen_signatures.items()
+    }
+
+    try:
+        with open(temp_path, "w", encoding="utf-8") as file:
+            json.dump(saved, file)
+        os.replace(temp_path, SEEN_SIGNATURES_FILE)
+    except OSError as exc:
+        print(f"⚠️ Could not save signature history: {exc}")
 
 
 def get_next_rpc_url():
@@ -133,14 +172,18 @@ def quick_detect_action(logs: list) -> str:
     return "⚡ معامله / مدیریت سفارش"
 
 
-async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, wallet_name: str, last_signatures: dict):
+async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, wallet_name: str, last_signatures: dict, seen_signatures: dict):
     sigs = await fetch_rpc(session, "getSignaturesForAddress", [wallet_addr, {"limit": 20}])
     if not sigs:
         return
 
+    seen = seen_signatures.setdefault(wallet_addr, {})
     last_sig = last_signatures.get(wallet_addr)
     if last_sig is None:
         last_signatures[wallet_addr] = sigs[0]["signature"]
+        for sig_info in sigs:
+            seen[sig_info["signature"]] = None
+        save_seen_signatures(seen_signatures)
         print(f"✅ Monitoring active for [{wallet_name}]")
         return
 
@@ -156,10 +199,19 @@ async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, walle
 
         for sig_info in reversed(new_sigs):
             sig = sig_info["signature"]
+            if sig in seen:
+                continue
             err = sig_info.get("err")
             block_time = sig_info.get("blockTime")
             
             tx_info = await fetch_rpc(session, "getTransaction", [sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+            if not tx_info:
+                continue
+            
+            seen[sig] = None
+            if len(seen) > 1000:
+                seen.pop(next(iter(seen)))
+            save_seen_signatures(seen_signatures)
             
             # Filter non-Phoenix transactions
             phoenix_market_type = get_phoenix_type(tx_info)
@@ -193,6 +245,7 @@ async def monitor_wallet(session: aiohttp.ClientSession, wallet_addr: str, walle
 async def main():
     print(f"🚀 Phoenix Tracker Active using [{config_name}.py]...")
     last_signatures = {}
+    seen_signatures = load_seen_signatures()
 
     async with aiohttp.ClientSession() as session:
         await send_telegram_alert(session, f"🚀 <b>Phoenix Multi-Wallet Tracker Active ({config_name}.py).</b>")
@@ -201,7 +254,7 @@ async def main():
             start_time = time.time()
             
             tasks = [
-                monitor_wallet(session, addr, name, last_signatures)
+                monitor_wallet(session, addr, name, last_signatures, seen_signatures)
                 for addr, name in TARGET_WALLETS.items()
             ]
             await asyncio.gather(*tasks)
